@@ -1,0 +1,36 @@
+# 密钥：绝对不要提交（任何名字带 secrets 的文件一律排除，宁可误伤）
+config/secrets.yaml
+config/secrets.yml
+config/secrets.json
+config/secrets.web.yaml
+config/secrets.web.yml
+config/secrets.web.json
+config/secrets*.local-backup*
+
+# 本地个人配置备份（开源清理时手工留的）
+config/*.local-backup*
+
+# 说明：config/models.web.yaml 是配置页面生成的厂商/模型清单，
+# 里面只有环境变量名、没有密钥，按设计是可以提交的。
+
+# 运行时状态与产物
+state/
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+# 虚拟环境：本项目零依赖，其实不需要 venv；真要建也别提交（几十 MB 且含绝对路径）
+.venv/
+venv/
+env/
+ENV/
+virtualenv/
+pyvenv.cfg
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
