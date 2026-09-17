@@ -26,8 +26,9 @@
 
 | 环境 | 用户级（所有项目可用） | 项目级（只在此仓库生效） |
 |---|---|---|
-| WorkBuddy | `~/.workbuddy/skills/media-router/` | `<项目>/.workbuddy/skills/media-router/` |
+| codex | `~/.codex/skills/media-router/` | `<项目>/.codex/skills/media-router/` |
 | Claude Code | `~/.claude/skills/media-router/` | `<项目>/.claude/skills/media-router/` |
+| deepseek harness | `~/.dsh/skills/media-router/` | `<项目>/.dsh/skills/media-router/` |
 | 其他 agent | 遵循它自己的 skills 目录约定 | 同左 |
 
 Windows 下 `~` 指 `C:\Users\<你>`。
