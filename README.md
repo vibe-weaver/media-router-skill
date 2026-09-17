@@ -1,11 +1,11 @@
 # media-router · 媒体生成调度
 
 <p>
-  <a href="https://github.com/vibe-weaver">
+  <a href="https://github.com/AB-ab-cyber">
     <img src="https://github.com/AB-ab-cyber.png?size=72" width="72" height="72" alt="vibe-weaver" style="border-radius:14px; vertical-align:middle"/>
   </a>
   <br/>
-  <a href="https://github.com/vibe-weaver"><strong>vibe-weaver</strong></a>
+  <a href="https://github.com/AB-ab-cyber"><strong>vibe-weaver</strong></a>
 </p>
 
 给文本模型补上"出图 / 出视频"这条腿。
