@@ -17,6 +17,10 @@ config/*.local-backup*
 state/
 outputs/
 
+# Agent 工具数据：WorkBuddy 的项目记忆/笔记本，含内部排查笔记与本地环境描述，
+# 属于本机工具状态而不是这个 skill 的交付内容，不入库。
+.workbuddy/
+
 # Python
 __pycache__/
 *.py[cod]

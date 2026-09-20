@@ -158,7 +158,8 @@ def _check_auth(
             Check(
                 "密钥校验",
                 WARN,
-                "该平台没有「只读」校验接口，无法在不生成的情况下确认密钥，请用「试生成」验证",
+                "该平台没有「只读」校验接口，无法在不生成的情况下确认密钥；"
+                "想确认请点「真实测试」（会消耗额度）",
             ),
             [],
         )
@@ -190,7 +191,21 @@ def _check_auth(
             return Check("密钥校验", WARN, f"校验请求返回 HTTP {status}，未能确认密钥"), []
         return Check("密钥校验", FAIL, f"校验请求失败：{exc}"), []
 
-    payload = resp.json()
+    try:
+        payload = resp.json()
+    except Exception as exc:  # noqa: BLE001 - 200 但不是 JSON 也是"没确认成功"，不是崩溃
+        # 常见于：被网关/WAF 拦成 HTML、区域不同回了空体、平台改版。
+        # 这里必须如实给一条结论，抛出去的话配置页面只会显示 500，
+        # 用户根本分不清是地址写错、密钥不对、还是平台抽风。
+        return (
+            Check(
+                "密钥校验",
+                WARN,
+                f"校验端点有响应但不是 JSON，未能确认密钥（{exc}）",
+            ),
+            [],
+        )
+
     models: list[str] = []
     path = entry.auth_check.get("models_path")
     if path:
@@ -278,7 +293,7 @@ def probe_target(
                 Check(
                     "模型名可用",
                     WARN,
-                    "该平台不提供模型列表，模型名需要靠「试生成」才能真正确认",
+                    "该平台不提供模型列表，模型名需要点「真实测试」实际生成一次才能确认",
                 )
             )
 
@@ -342,7 +357,7 @@ def deep_probe(
         return {
             "ok": True,
             "delegate": result.delegate,
-            "note": "该模型走内置工具通道，无法在这里试生成，需要由 AI 助手调用它的内置出图能力完成。",
+            "note": "该模型走内置工具通道，无法在这里做生成验证，需要由 AI 助手调用它的内置出图能力完成。",
         }
     if result.status != "ok":
         return {"ok": False, "error": result.error or "生成失败"}
@@ -421,6 +436,17 @@ def _dig_path(payload: Any, path: str) -> Any:
     return node
 
 
+def _item_name(item: dict[str, Any], name_field: str) -> str:
+    """从模型条目里取名字。两条提取路径（_extract_names / _local_capability_filter）
+    必须用同一套兜底顺序，否则两边算出来的名字对不上，本地过滤会把能用的模型
+    全部误判成"不匹配"。
+
+    顺序：配置指定的字段 -> id -> model。
+    """
+    value = item.get(name_field) or item.get("id") or item.get("model")
+    return str(value) if value else ""
+
+
 def _extract_names(payload: Any, models_path: str, name_field: str) -> list[str]:
     """从响应里把模型名捞出来。兼容两种常见形状：
 
@@ -442,9 +468,9 @@ def _extract_names(payload: Any, models_path: str, name_field: str) -> list[str]
                 if item.strip():
                     out.append(item.strip())
             elif isinstance(item, dict):
-                value = item.get(name_field) or item.get("id") or item.get("model")
-                if value:
-                    out.append(str(value))
+                name = _item_name(item, name_field)
+                if name:
+                    out.append(name)
     return out
 
 
@@ -488,9 +514,9 @@ def _local_capability_filter(
             continue
         saw_field = True
         if any(str(c).strip() in want for c in caps):
-            value = item.get(name_field) or item.get("model") or item.get("id")
-            if value:
-                kept.append(str(value))
+            name = _item_name(item, name_field)
+            if name:
+                kept.append(name)
     return kept, saw_field
 
 
@@ -592,12 +618,16 @@ def fetch_models(
     # 平台若支持按类目过滤（百炼的 capabilities=IG/VG），优先用它 —— 比猜名字准
     kind_param = str(spec.get("kind_param") or "")
     kind_values = (spec.get("kind_values") or {}).get(kind) if spec.get("kind_values") else None
-    filtered_by = "none"
+    #: 服务端过滤方式（我们自己传了什么参数过去）。和下面的 filtered_by 分开记 ——
+    #: filtered_by 描述的是"最终这份列表是怎么筛出来的"，用服务端过滤时它可能
+    #: 因为响应里没有 capabilities 字段而退化成 name_guess，把"服务端已经筛过"
+    #: 这个事实丢掉。
+    server_filter = "none"
     if kind_param and kind_values:
         for value in kind_values:
             params.setdefault(kind_param, [])
             params[kind_param].append(value)
-        filtered_by = kind_param
+        server_filter = kind_param
 
     url = str(spec["url"])
     try:
@@ -684,6 +714,7 @@ def fetch_models(
         "source_url": url,
         "source": source,
         "filtered_by": filtered_by,
+        "server_filter": server_filter,
         "suggestions": suggestions,
     }
 
@@ -699,6 +730,8 @@ def fetch_models(
             )
             if skipped:
                 note += f" 返回的是：{('、'.join(sorted(set(skipped))[:8]))} 等。"
+        if server_filter != "none":
+            note += f"（已经带上 {kind_param} 参数请求过，平台可能是静默忽略了它。）"
         if suggestions:
             note += f" 该类目可以直接填：{'、'.join(suggestions)}"
         result["note"] = note
@@ -712,6 +745,8 @@ def fetch_models(
         )
     else:
         result["note"] = f"共 {len(matched)} 个{'图像' if kind == 'image' else '视频'}模型。"
+        if server_filter != "none":
+            result["note"] = result["note"][:-1] + f"（已按 {server_filter} 参数过滤）。"
     if truncated:
         result["note"] += f" 数量较多，只显示前 {limit} 个。"
 

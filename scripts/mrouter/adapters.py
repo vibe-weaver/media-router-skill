@@ -114,12 +114,6 @@ def _ext_from_url(url: str, fallback: str) -> str:
     return fallback
 
 
-def _stamp() -> str:
-    """毫秒精度时间戳 —— 秒级精度会让同一秒内的两次生成互相覆盖。"""
-    now = time.time()
-    return time.strftime("%Y%m%d_%H%M%S", time.localtime(now)) + f"{int(now * 1000) % 1000:03d}"
-
-
 def _unique_path(dest: Path) -> Path:
     """目标文件已存在时追加序号，确保永不覆盖既有产物。"""
     if not dest.exists():
@@ -141,6 +135,10 @@ def _fetch_to_local(
 ) -> Path:
     """下载并纠正扩展名（以真实文件头为准）。"""
     default_ext = ".mp4" if kind == "video" else ".png"
+    if str(url).startswith("data:"):
+        # 有些平台直接把产物以内联 base64 返回。urllib 不认 data: scheme，
+        # 交给 download 只会得到 "unknown url type: data"，所以这里单独处理。
+        return _write_b64_to_local(str(url), out_dir, stem, index, kind)
     ext = _ext_from_url(url, default_ext)
     dest = _unique_path(out_dir / f"{stem}_{index:02d}{ext}")
     download(url, dest, headers=headers, timeout=300.0)
@@ -200,12 +198,41 @@ def _render(node: Any, variables: dict[str, Any]) -> Any:
         whole = node.strip()
         inner = whole[2:-2].strip() if whole.startswith("{{") and whole.endswith("}}") else None
         if inner and inner in variables:
-            return variables[inner]
+            value = variables[inner]
+            # 整串就是一个占位符时返回原始值（保留 int / bool 类型）。
+            # None 要变成空串 —— 否则会被 str() 成字面量 "None" 拼进地址里。
+            return "" if value is None else value
         return stripped
     if isinstance(node, dict):
         return {k: _render(v, variables) for k, v in node.items()}
     if isinstance(node, list):
         return [_render(v, variables) for v in node]
+    return node
+
+
+def _prune_empty(node: Any) -> Any:
+    """把渲染后剩下的空串删掉。**只删空串，不碰 0 / False / None。**
+
+    ``{{duration}}`` / ``{{aspect_ratio}}`` 这类占位符在"没指定"时会渲染成空串
+    （以及修好之前的 ``{{duration}}`` 会渲染成数字 ``0``），原样发出去就是
+    ``"duration": ""`` 或者干脆 ``"duration": 0`` —— 多数平台只会回一个 400，
+    而用户完全看不出这是自己的模板里少填了一个变量。
+
+    "没填就不发这个字段"才是对的语义，这也和各家适配器里 ``if ratio:`` 的写法一致。
+
+    为什么**只**删空串：``seed: 0``、``camera_fixed: false`` 这类合法的假值必须
+    原样留下 —— 它们和"没填"完全是两回事，删掉就是另一个 bug（就是 M3 那个）。
+    """
+    if isinstance(node, dict):
+        out: dict[Any, Any] = {}
+        for key, value in node.items():
+            cleaned = _prune_empty(value)
+            if isinstance(cleaned, str) and cleaned == "":
+                continue
+            out[key] = cleaned
+        return out
+    if isinstance(node, list):
+        return [_prune_empty(item) for item in node]
     return node
 
 
@@ -321,6 +348,126 @@ def _param_map(spec: ModelSpec, req: GenRequest, keys: list[str]) -> dict[str, A
     return out
 
 
+def _passthrough_inputs(
+    spec: ModelSpec,
+    req: GenRequest,
+    *,
+    log: Callable[[str], None] | None = None,
+    default_count_field: str = "",
+) -> dict[str, Any]:
+    """replicate / fal 这类"把一堆字段塞进同一个对象"的适配器的入参合并。
+
+    这两个分支过去只读 ``req.extra["inputs"]``（一个嵌套字典），但 CLI 的
+    ``--param`` 产出的是**扁平** key=value —— 没有任何代码会去造嵌套的 inputs，
+    于是文档承诺的"``--param key=value`` 会合并进 input"根本没发生，参数被静默丢弃。
+    这里把几种来源按 低 → 高 优先级收口：
+
+        spec.params  <  options.inputs  <  --param（扁平 extra）  <  extra.inputs（嵌套）
+
+    随后补 ``--duration`` / ``--count``。它们的字段名各家不同（replicate 上
+    有 ``duration`` / ``num_frames`` / ``video_length`` 多种），所以：
+
+      - 字段名可用 ``options.duration_field`` / ``options.count_field`` 覆盖；
+      - 设成 ``none`` / ``false`` 表示显式关闭，此时会**留一行日志**说明被忽略，
+        而不是继续静默吃掉用户传的旗标；
+      - 优先级遵循 references/providers.md：
+        点名字段（``--param duration=N``） > ``--duration N`` > ``params.duration``；
+      - **按 kind 收紧**：``--duration`` 只对视频注入、``--count`` 只对图片注入。
+        把 ``num_outputs`` / ``num_images`` 这类出图参数塞进视频请求，换来的
+        只有 422，所以在 kind 不匹配时宁可不发（并留日志）。
+    """
+    opts = spec.options if isinstance(spec.options, dict) else {}
+
+    merged: dict[str, Any] = {}
+    merged.update(spec.params)
+
+    declared = opts.get("inputs")
+    if isinstance(declared, dict):
+        merged.update(declared)
+
+    # 扁平 --param，以及（理论上存在的）嵌套 extra.inputs
+    flat = {k: v for k, v in req.extra.items() if k != "inputs"}
+    merged.update(flat)
+
+    nested = req.extra.get("inputs")
+    if isinstance(nested, dict):
+        merged.update(nested)
+
+    # 用户"点名"过的字段：--param 或 extra.inputs 里出现过，一律最高优先，
+    # 后续的 --duration / --count 兜底不得覆盖它们。
+    named = set(flat)
+    if isinstance(nested, dict):
+        named.update(nested)
+
+    def _resolve_field(key: str, fallback: str) -> str:
+        raw = opts.get(key, fallback)
+        if raw is None:
+            raw = fallback
+        if isinstance(raw, bool):
+            raw = "" if raw is False else fallback
+        text = str(raw).strip()
+        if text.lower() in ("none", "false", "null", "-", "off"):
+            return ""
+        return text
+
+    # ---- 时长（只对视频有意义）----
+    # --duration 是视频旗标；把它注入图片请求只会在平台上换个 422。
+    d_field = _resolve_field("duration_field", "duration")
+    if req.duration and req.kind == "video":
+        if not d_field:
+            if log:
+                log(
+                    f"--duration {req.duration} 未生效：本条 options.duration_field 已被关闭。"
+                    f"若该模型确实支持，请用 --param <字段名>={req.duration} 点名。"
+                )
+        elif d_field in named:
+            if log:
+                log(f"--duration {req.duration} 被 --param {d_field}=… 覆盖（点名字段优先）")
+        else:
+            merged[d_field] = req.duration
+            if log:
+                log(
+                    f"--duration {req.duration} -> 入参 {d_field}；"
+                    f"若该模型字段名与此不同（如 num_frames / video_length），"
+                    f"改用 --param <字段名>={req.duration}"
+                )
+    elif req.duration:
+        if log:
+            log(f"--duration {req.duration} 未生效：kind={req.kind} 不是视频。")
+
+    # ---- 数量（只对图片有意义）----
+    # count 默认值是 1、几乎每次请求都带，所以只在用户明确要求 >1 时才考虑注入；
+    # 而且没有任何一个视频接口认这个字段（num_outputs / num_images 都是出图参数），
+    # 往视频请求里塞只会换来 422 —— 所以限死在 image。
+    c_field = _resolve_field("count_field", default_count_field)
+    if req.count and req.count > 1 and req.kind == "image":
+        if not c_field:
+            if log:
+                log(
+                    f"--count {req.count} 未生效：本条未声明 options.count_field。"
+                    f"请用 --param <字段名>={req.count} 点名（replicate 常见 num_outputs，"
+                    f"fal 常见 num_images）。"
+                )
+        elif c_field in named:
+            if log:
+                log(f"--count {req.count} 被 --param {c_field}=… 覆盖（点名字段优先）")
+        else:
+            merged[c_field] = req.count
+            if log:
+                log(
+                    f"--count {req.count} -> 入参 {c_field}；"
+                    f"若该模型字段名与此不同，改用 --param <字段名>={req.count}"
+                )
+    elif req.count and req.count > 1:
+        if log:
+            log(
+                f"--count {req.count} 未生效：kind={req.kind} 不是图片。"
+                f"确有多产物需求时请用 --param <字段名>={req.count} 点名。"
+            )
+
+    return merged
+
+
 # ---------------------------------------------------------------- native
 
 
@@ -376,9 +523,11 @@ def gen_openai(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) ->
     只要在配置里改 endpoint 就能复用。
     """
     headers = {"Authorization": f"Bearer {ctx.api_key}"}
-    edit_mode = bool(req.images) and (
-        "img2img" in req.requires or "edit" in req.requires or bool(req.images)
-    )
+    # 有输入图就走 /edits（改图）。原来的写法是
+    # `bool(req.images) and ("img2img" in req.requires or … or bool(req.images))` ——
+    # 括号里那串判断恒等于 bool(req.images)，纯属噪音，别让读者误以为
+    # requires 参与了这个决定。
+    edit_mode = bool(req.images)
 
     if edit_mode:
         url = spec.endpoint or "https://api.openai.com/v1/images/generations"
@@ -480,6 +629,31 @@ def _dashscope_size(value: str) -> str:
     return v
 
 
+def _dashscope_task_base(spec: ModelSpec) -> tuple[str, bool]:
+    """任务**查询**地址的 base，外加"是不是从配置推出来的"。
+
+    查询地址必须跟着提交地址走。百炼的提交路径是 ``{base}/services/aigc/…``、
+    查询是 ``{base}/tasks/{id}``，所以从提交地址里切掉 ``/services/…`` 就得到 base。
+
+    为什么非做不可：给百炼配了中转/自建网关时，提交走网关、查询却直连
+    dashscope.aliyuncs.com —— 要么被拦、要么悄悄绕过网关。而且报错只是一个
+    连接超时，完全指不到原因。
+
+    推不出来时（endpoint 里没有 ``/services/`` 这一段）**宁可退回官方地址**，
+    也不要拼一个"看起来对、其实是错的"地址 —— 后者会得到一个更迷惑的 404。
+    这种情形用 ``options.task_base`` 显式指定。
+    """
+    explicit = str(spec.options.get("task_base") or "").strip()
+    if explicit:
+        return explicit.rstrip("/"), True
+    endpoint = str(spec.endpoint or "").strip()
+    if endpoint:
+        head = endpoint.split("/services/", 1)[0].rstrip("/")
+        if head and head != endpoint.rstrip("/"):
+            return head, True
+    return DASHSCOPE_BASE, False
+
+
 def _gen_dashscope_qwen_image(
     spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
 ) -> GenResult:
@@ -569,7 +743,23 @@ def _gen_dashscope_wanx(
             inputs["img_url"] = req.images[0]
         parameters: dict[str, Any] = {}
         parameters.update(spec.params)
-        parameters.update(_param_map(spec, req, ["size", "resolution", "duration", "prompt_extend"]))
+        parameters.update(_param_map(spec, req, ["size", "resolution", "prompt_extend"]))
+        # 时长必须**单独**取：CLI 的 --duration 落在 req.duration 上，而 _param_map
+        # 只认 spec.params / req.extra —— 光靠它会把 --duration 静默丢掉（火山分支
+        # 用 `req.duration or spec.params.get("duration")` 兜住了，这段漏了），
+        # 于同一条 --duration 换个平台就失效，而且不报任何错。
+        # 优先级按"越具体越优先"：--param duration=（点名了字段）
+        #   > --duration（专用旗标）> 条目里的 params.duration（已在上面打底）。
+        duration = req.extra.get("duration")
+        if duration in (None, ""):
+            duration = req.duration
+        # 这里必须用**真值**判断，不能写 `if duration not in (None, "")`：
+        # 0 既不等于 None 也不等于 ""，所以 `0 in (None, "")` 是 False ——
+        # 那个写法会把 `duration: 0` 一路发出去，还会把条目里的
+        # params.duration 覆盖成 0（就是 M3 那个坑的同一个形状，自检抓住了）。
+        # 0 秒的视频没有意义，一律视为"没指定"。
+        if duration:
+            parameters["duration"] = duration
         req_size = req.size or req.aspect_ratio
         if req_size and "size" not in parameters:
             parameters["size"] = _dashscope_size(req_size)
@@ -599,7 +789,14 @@ def _gen_dashscope_wanx(
     if not task_id:
         raise HttpError(f"未拿到 task_id：{json.dumps(payload, ensure_ascii=False)[:300]}")
 
-    poll_url = f"{DASHSCOPE_BASE}/tasks/{task_id}"
+    task_base, derived = _dashscope_task_base(spec)
+    if spec.endpoint and not derived:
+        ctx.log(
+            "[dashscope] endpoint 是自定义地址，但里面没有 /services/ 这一段，"
+            "推不出任务查询地址，已回退到官方地址。如果这里配的是中转/网关，"
+            "请在模型的 options.task_base 里显式写上查询地址的前缀。"
+        )
+    poll_url = f"{task_base}/tasks/{task_id}"
 
     def probe() -> list[str] | None:
         data = request(
@@ -859,9 +1056,12 @@ def gen_replicate(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx)
         "Authorization": f"Bearer {ctx.api_key}",
         "Content-Type": "application/json",
     }
-    inputs: dict[str, Any] = {"prompt": req.prompt}
-    inputs.update(spec.params)
-    inputs.update(req.extra.get("inputs") or {})
+    # 入参来源与优先级统一走 _passthrough_inputs（修掉 --param / --duration / --count
+    # 在这条链路上被静默丢弃的问题）。replicate 的批量出图字段是 num_outputs。
+    inputs: dict[str, Any] = _passthrough_inputs(
+        spec, req, log=ctx.log, default_count_field="num_outputs"
+    )
+    inputs.setdefault("prompt", req.prompt)
     if req.negative_prompt:
         inputs.setdefault("negative_prompt", req.negative_prompt)
     if req.aspect_ratio:
@@ -886,7 +1086,7 @@ def gen_replicate(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx)
     if status == "failed":
         raise HttpError(f"任务失败：{payload.get('error')}")
 
-    if status not in ("succeeded", "failed", "canceled") and payload.get("urls", {}).get("get"):
+    if status not in ("succeeded", "failed", "canceled") and (payload.get("urls") or {}).get("get"):
         get_url = payload["urls"]["get"]
 
         def probe() -> list[str] | None:
@@ -917,9 +1117,11 @@ def gen_replicate(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx)
 def gen_fal(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> GenResult:
     headers = {"Authorization": f"Key {ctx.api_key}", "Content-Type": "application/json"}
     url = spec.endpoint or f"https://queue.fal.run/{spec.model or spec.id}"
-    body: dict[str, Any] = {"prompt": req.prompt}
-    body.update(spec.params)
-    body.update(req.extra.get("inputs") or {})
+    # 同 replicate：统一走 _passthrough_inputs，fal 的批量出图字段是 num_images。
+    body: dict[str, Any] = _passthrough_inputs(
+        spec, req, log=ctx.log, default_count_field="num_images"
+    )
+    body.setdefault("prompt", req.prompt)
     if req.images:
         body.setdefault("image_url", req.images[0])
     if req.aspect_ratio:
@@ -1038,7 +1240,9 @@ def gen_generic_http(
         "model": spec.model or spec.id,
         "size": req.size or spec.params.get("size") or "",
         "aspect_ratio": req.aspect_ratio,
-        "duration": req.duration,
+        # 没指定时长时给空串而不是 0：空串会被 _prune_empty 剔掉（"没填就不发"），
+        # 而 0 会原样发出去，平台只会回 400。
+        "duration": req.duration or "",
         "count": req.count,
         "image": req.images[0] if req.images else "",
         "image_url": req.images[0] if req.images else "",
@@ -1061,7 +1265,7 @@ def gen_generic_http(
         body_template = {"prompt": "{{prompt}}", "model": "{{model}}"}
         if req.kind == "video":
             body_template["aspect_ratio"] = "{{aspect_ratio}}"
-    merged_body = _render(body_template, variables)
+    merged_body = _prune_empty(_render(body_template, variables))
     if isinstance(merged_body, dict):
         merged_body.update({k: v for k, v in spec.params.items()})
         for key, value in req.extra.items():
@@ -1105,7 +1309,20 @@ def gen_generic_http(
             )
         return _finalize(spec, req, urls, req.output_dir)
 
-    task_id = _dig(payload, submit.get("task_id_path"))
+    # task_id_path 必须先有，再去取值。
+    # 少了这一步，_dig(payload, None) 会把**整个响应**当成 task_id 返回
+    # （它的约定是"没有路径就返回原值"），于是 task_id 变成一个巨大的字典、
+    # 被 str() 拼进轮询地址，实际发出去的是 https://…/{'data': {'status': …}}
+    # 这种垃圾请求，最后以超时收场 —— 用户完全查不到真正的原因。
+    task_id_path = submit.get("task_id_path")
+    if not task_id_path:
+        raise HttpError(_generic_http_help(spec, "options.submit.task_id_path"))
+    task_id = _dig(payload, task_id_path)
+    if task_id in (None, ""):
+        raise HttpError(
+            f"提交响应里没有 {task_id_path}，拿不到任务 id。"
+            f"响应前 200 字：{json.dumps(payload, ensure_ascii=False)[:200]}"
+        )
     poll_url_template = pl.get("url")
     if not poll_url_template:
         raise HttpError(_generic_http_help(spec, "options.poll.url"))

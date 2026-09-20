@@ -150,9 +150,19 @@ def write_structured(path: Path, data: dict[str, Any], header: str) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     body = miniyaml.dumps(data)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(header + body, encoding="utf-8")
-    tmp.replace(path)  # 原子替换，避免写一半被读到
+    # tmp 名带上 pid。_WRITE_LOCK 只管得住本进程：两个进程（比如终端里跑
+    # generate 的同时开着配置页面）写同一个 tmp 再各自 replace，后写进去的
+    # 内容会被前一个 replace 顺手覆盖掉，且没有任何报错。
+    tmp = path.parent / f"{path.name}.{os.getpid()}.tmp"
+    try:
+        tmp.write_text(header + body, encoding="utf-8")
+        tmp.replace(path)  # 原子替换，避免写一半被读到
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------- 叠加层操作
@@ -190,10 +200,63 @@ class Overlay:
         return self.data["vendors"]
 
     def find_vendor(self, vendor_id: str) -> dict[str, Any] | None:
+        """在两层里找厂商。叠加层优先。
+
+        **必须认手写层。** 页面上列的是"手写层 + 叠加层"合并后的厂商，
+        只盯叠加层的话，用户在 models.yaml 里手写的 `vendors:` 会出现在列表里、
+        却一保存就报"找不到厂商" —— 看得见、用不了。
+        """
+        found = self.locate_vendor(vendor_id)
+        return found[0] if found else None
+
+    def base_vendors(self) -> list[dict[str, Any]]:
+        """手写层里的厂商条目（只读）。"""
+        raw = self.base.get("vendors")
+        if not isinstance(raw, list):
+            return []
+        return [v for v in raw if isinstance(v, dict) and v.get("id")]
+
+    def locate_vendor(self, vendor_id: str) -> tuple[dict[str, Any], str] | None:
+        """返回 (条目, 来源)：来源是 ``"overlay"``（能真改）或 ``"base"``（只能覆盖）。"""
         for item in self.vendors:
             if str(item.get("id")) == vendor_id:
-                return item
+                return item, "overlay"
+        for item in self.base_vendors():
+            if str(item.get("id")) == vendor_id:
+                return item, "base"
         return None
+
+    def _used_env_names(self, except_id: str) -> set[str]:
+        """两层里已经被占用的密钥变量名（排除自己）。"""
+        out: set[str] = set()
+        for item in self.vendors + self.base_vendors():
+            if str(item.get("id")) == except_id:
+                continue
+            value = item.get("api_key_env")
+            if value:
+                out.add(str(value))
+        return out
+
+    def model_ids(self) -> set[str]:
+        """两层的 id 全集。生成新 id 时要避开手写层已经用掉的 id，
+        否则新建的模型会静默顶掉用户手写的那条。"""
+        return {str(item.get("id")) for _kind, item in self.all_models()} | {
+            str(item.get("id")) for _kind, item in self.base_models()
+        }
+
+    def vendor_ids(self) -> set[str]:
+        """两层的厂商 id 全集。
+
+        生成新厂商 id 时同样要避开手写层 —— 撞车的话 `_merge_config` 会留下
+        同 id 的两条，合并时后者把前者整个盖掉，用户会莫名其妙少一个厂商。
+        """
+        return {str(item.get("id")) for item in self.vendors} | {
+            str(item.get("id")) for item in self.base_vendors()
+        }
+
+    def base_models(self) -> list[tuple[str, dict[str, Any]]]:
+        """手写层里的模型。"""
+        return config.layer_models(self.base)
 
     def all_models(self) -> list[tuple[str, dict[str, Any]]]:
         """叠加层里的模型（不含墓碑）。"""
@@ -203,10 +266,6 @@ class Overlay:
                 if isinstance(item, dict) and item.get("id") and not config.is_tombstone(item):
                     out.append((kind, item))
         return out
-
-    def base_models(self) -> list[tuple[str, dict[str, Any]]]:
-        """手写层里的模型。"""
-        return config.layer_models(self.base)
 
     def locate_model(
         self, model_id: str
@@ -230,16 +289,6 @@ class Overlay:
             if str(item.get("id")) == model_id:
                 return kind, item
         return None
-
-    def model_ids(self) -> set[str]:
-        """两层的 id 全集。生成新 id 时要避开手写层已经用掉的 id，
-        否则新建的模型会静默顶掉用户手写的那条。"""
-        return {str(item.get("id")) for _kind, item in self.all_models()} | {
-            str(item.get("id")) for _kind, item in self.base_models()
-        }
-
-    def vendor_ids(self) -> set[str]:
-        return {str(item.get("id")) for item in self.vendors}
 
     def models_of_vendor(self, vendor_id: str) -> list[str]:
         """引用该厂商的模型 id（两层都算，级联删除时要一并遮掉）。"""
@@ -300,7 +349,9 @@ class Overlay:
         if created:
             vendor_id = catalog.vendor_id_for(entry.key, sorted(self.vendor_ids()))
 
-        existing = self.find_vendor(vendor_id)
+        located = self.locate_vendor(vendor_id) if vendor_id else None
+        existing = located[0] if located else None
+        layer = located[1] if located else ""
         label = str(payload.get("label") or "").strip() or entry.label
 
         item: dict[str, Any] = {
@@ -354,11 +405,7 @@ class Overlay:
                 # 编辑时环境变量名保持不变 —— 变的会是一次性换名，把已有密钥弄丢
                 env = str(existing["api_key_env"])
             else:
-                used = {
-                    str(v.get("api_key_env"))
-                    for v in self.vendors
-                    if v is not existing and v.get("api_key_env")
-                }
+                used = self._used_env_names(vendor_id)
                 env = requested if requested not in used else _unique_env(
                     requested, used
                 )
@@ -368,12 +415,20 @@ class Overlay:
                     )
             item["api_key_env"] = env
 
-        # 写回列表：保持原有位置，新条目追加在末尾
-        if existing is not None:
+        # 写回列表：叠加层里原地更新（保持原有位置），手写层改成写一条覆盖条目
+        if existing is not None and layer == "overlay":
             existing.clear()
             existing.update(item)
         else:
+            # 手写层的厂商不能直接改 —— self.base 只是读进来的内存副本，改它
+            # 既不会落盘、也不会生效，用户的编辑会凭空消失。改成在叠加层追加
+            # 一条同 id 的条目：合并时叠加层优先，效果等同于"编辑过这个厂商"。
             self.vendors.append(item)
+            if layer == "base":
+                messages.append(
+                    "这个厂商写在 config/models.yaml 里，页面不改动你手写的文件，"
+                    "本次修改记在 models.web.yaml 中（同 id 覆盖）"
+                )
 
         key_value = str(payload.get("api_key") or "").strip()
         key_saved = False
@@ -393,9 +448,10 @@ class Overlay:
         }
 
     def delete_vendor(self, vendor_id: str) -> dict[str, Any]:
-        existing = self.find_vendor(vendor_id)
-        if existing is None:
+        located = self.locate_vendor(vendor_id)
+        if located is None:
             raise config.ConfigError(f"找不到厂商：{vendor_id}")
+        existing, layer = located
 
         dropped = set(self.models_of_vendor(vendor_id))
         # 级联删除引用它的模型 —— 否则那些模型会因为没有 provider 把整份配置弄坏，
@@ -412,15 +468,31 @@ class Overlay:
             if str(item.get("id")) in dropped:
                 self._write_tombstone(kind, str(item.get("id")))
 
-        self.vendors.remove(existing)
+        # 只摘叠加层里的那条。手写层的厂商删不掉（不能改用户手写的文件），
+        # 但引用它的模型已经全部处理过了，配置仍然是自洽的。
+        for index, item in enumerate(self.vendors):
+            if item is existing:
+                del self.vendors[index]
+                break
 
         label = str(existing.get("label") or vendor_id)
         message = f"厂商「{label}」已删除"
+        if layer == "base":
+            message = (
+                f"厂商「{label}」写在 config/models.yaml 里，页面不改动你手写的文件，"
+                f"所以它还会留在文件里（想彻底删掉请打开那个文件删掉这一段）。"
+                f"引用它的模型已经全部隐藏，配置仍然是可用的。"
+            )
         if dropped:
             message += (
                 f"，同时移除了引用它的 {len(dropped)} 个模型：" + "、".join(sorted(dropped))
             )
-        return {"id": vendor_id, "removed_models": sorted(dropped), "message": message}
+        return {
+            "id": vendor_id,
+            "removed_models": sorted(dropped),
+            "from_base": layer == "base",
+            "message": message,
+        }
 
     # ---------- 模型 ----------
 
@@ -477,9 +549,9 @@ class Overlay:
         # 编辑时保留原有的启用状态：表单里没有这个开关，不能顺手把停用的模型开回来。
         # 手写层的条目也要读到 —— 否则改一下手写层里停用的模型就把它激活了。
         if previous_row is not None:
-            enabled = bool(previous_row.get("enabled", True))
+            enabled = config.coerce_enabled(previous_row.get("enabled", True))
         else:
-            enabled = bool(payload.get("enabled", True))
+            enabled = config.coerce_enabled(payload.get("enabled", True))
 
         label = str(payload.get("label") or "").strip()
 
@@ -507,7 +579,11 @@ class Overlay:
                 name = str(key).strip()
                 if not name:
                     continue
-                if value in ("", None, 0, "0"):
+                # 只有"真的空"才算用户清空了输入框。
+                # 早期写的是 `value in ("", None, 0, "0")` —— 0 == False，
+                # 于是 seed: 0、guidance_scale: 0 这种**合法的 0** 会被静默删掉，
+                # 用户明明填了 0，存下来却没有这个键。
+                if value is None or value == "":
                     params.pop(name, None)
                 elif isinstance(value, (str, int, float, bool)):
                     params[name] = value.strip() if isinstance(value, str) else value
@@ -549,6 +625,12 @@ class Overlay:
             else:
                 old_item.clear()
                 old_item.update(item)
+        elif located is not None and located[0] != kind:
+            # 改的是**手写层**里的模型，而且换了类目。手写层那条删不掉，
+            # 只在叠加层的新池里加一条是不够的 —— _dedupe_last 只去重同一个池，
+            # 结果 image 和 video 两个池里会各有一份同 id 的模型，
+            # 路由到错误类目的那一次必然失败。所以给旧类目补一条墓碑把它盖掉。
+            self._write_tombstone(located[0], model_id)
 
         if previous is None:
             # 手写层里有同 id 的条目时，这里写入的就是一条覆盖条目 ——
@@ -631,15 +713,6 @@ class Overlay:
             if not bucket:
                 self.data.pop(kind, None)
 
-    def save(self) -> Path:
-        _guard_writable()
-        with _WRITE_LOCK:
-            self._prune_empty_pools()
-            # 厂商里不写任何密钥字段，只留 api_key_env 这个名字
-            path = overlay_path()
-            write_structured(path, self.data, HEADER)
-            return path
-
 
 # ---------------------------------------------------------------- 密钥
 
@@ -665,12 +738,22 @@ def save_secret(env_name: str, value: str) -> Path:
 
 
 def _vendor_view(
-    item: dict[str, Any], resolved_keys: dict[str, str], model_count: int
+    item: dict[str, Any],
+    resolved_keys: dict[str, str],
+    model_count: int,
+    from_base: bool = False,
 ) -> dict[str, Any]:
     vendor_id = str(item.get("id") or "")
     env = str(item.get("api_key_env") or "")
     entry = catalog.get(str(item.get("catalog") or ""))
     keyless = bool(entry and entry.keyless)
+    # 目录里把密钥标成"可选"的平台（如自定义接口）：没填密钥不等于配错了，
+    # 页面要能区分"缺密钥"和"这个平台本来就不用密钥"。
+    key_optional = bool(
+        entry
+        and entry.key_fields
+        and all(not field.required for field in entry.key_fields)
+    )
     endpoints = dict(item.get("endpoints") or {})
     return {
         "id": vendor_id,
@@ -682,6 +765,10 @@ def _vendor_view(
         "options": dict(item.get("options") or {}),
         "model_count": model_count,
         "keyless": keyless,
+        "key_optional": key_optional,
+        #: 这条是用户手写在 models.yaml 里的，还是页面建的？
+        #: 页面据此说明"删除"和"编辑"分别会写到哪个文件。
+        "from_base": from_base,
         "has_key": keyless or bool(resolved_keys.get(env) or resolved_keys.get(vendor_id)),
         # 按这个厂商**实际填的地址**算，而不是目录默认地址 ——
         # 自建接口（generic_http）的地址是用户自己填的，能推导就该亮按钮。
@@ -724,7 +811,7 @@ def _model_view(
         "catalog": str(vendor.get("catalog") or ""),
         "priority": priority,
         "weight": weight,
-        "enabled": bool(item.get("enabled", True)),
+        "enabled": config.coerce_enabled(item.get("enabled", True)),
         "supports": [str(s) for s in supports],
         # 生成参数（尺寸/时长等）。页面用它回填"生成规格"输入框。
         "params": dict(params) if isinstance(params, dict) else {},
@@ -798,14 +885,28 @@ def bootstrap(host: str = "127.0.0.1") -> dict[str, Any]:
                     vid = str(item.get("vendor") or "")
                     counts[vid] = counts.get(vid, 0) + 1
 
+    base_layer = config.base_layer()
+    base_ids = {
+        str(item.get("id")) for _kind, item in config.layer_models(base_layer)
+    }
+    base_vendor_ids = {
+        str(v.get("id"))
+        for v in (base_layer.get("vendors") or [])
+        if isinstance(v, dict) and v.get("id")
+    }
+
     vendors = [
-        _vendor_view(item, resolved, counts.get(str(item.get("id")), 0))
+        _vendor_view(
+            item,
+            resolved,
+            counts.get(str(item.get("id")), 0),
+            from_base=str(item.get("id")) in base_vendor_ids,
+        )
         for item in raw_vendors
         if isinstance(item, dict) and item.get("id")
     ]
 
     models: dict[str, list[dict[str, Any]]] = {}
-    base_ids = {str(item.get("id")) for _kind, item in config.layer_models(config.base_layer())}
     for key, value in data.items():
         if key in ("version", "defaults", "vendors"):
             continue
@@ -871,8 +972,14 @@ def load_overlay() -> Overlay:
 
 
 def save_with(mutate: Callable[[Overlay], Any]) -> Any:
-    """加载 → 在写锁里改 → 落盘。服务端所有写接口都走这里。"""
+    """加载 → 在写锁里改 → 落盘。服务端所有写接口都走这里。
+
+    **只读校验必须在这里做。** 以前只有 Overlay.save() 会调 _guard_writable，
+    而那个方法全项目没人调用（像个装饰品），于是只读模式下 save_with 照样
+    把 models.web.yaml 写下去 —— 页面和终端横幅都还在说"只会读取，不会写入"。
+    """
     with _WRITE_LOCK:
+        _guard_writable()
         overlay = Overlay(read_overlay())
         result = mutate(overlay)
         overlay._prune_empty_pools()  # noqa: SLF001 - 同类协作

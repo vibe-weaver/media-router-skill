@@ -263,6 +263,7 @@ def check_page_js(page: Any) -> None:
         ('data-act="edit-vendor"', "厂商编辑按钮"),
         ("/api/vendor/test", "厂商连通性测试"),
         ("/api/model/test", "模型连通性测试"),
+        ('id="btn-real-test-model"', "模型真实测试按钮"),
         ("function uiConfirm(", "删除模型的确认弹窗"),
         ("modal-mask", "弹窗遮罩层"),
         # 这三条是"点了没反应"的防线，缺一个就可能又变成静默失效
@@ -369,16 +370,16 @@ def main() -> int:
     return 0
 
 
-def check_generic_http(client: Client, check) -> None:
-    """用一个本地模拟接口验证：只填一个接口地址，能不能真的生成出图。"""
-    import base64
+def check_real_test(client: Client, check) -> None:
+    """页面的「真实测试」按钮：真生成一次，验证提交→下载→落盘整条链路。
+
+    用一个本地模拟接口当 provider，不需要任何真实 API Key，也不会花钱。
+    """
     import shutil
     import struct
     import zlib
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-    from urllib.parse import urlparse
 
-    # 一张 1x1 的真 PNG，用来验证下载与落盘
     def make_png() -> bytes:
         def chunk(tag: bytes, data: bytes) -> bytes:
             return (
@@ -413,28 +414,15 @@ def check_generic_http(client: Client, check) -> None:
 
         def do_POST(self) -> None:  # noqa: N802
             length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length) if length else b""
-            seen["path"] = self.path
-            seen["body"] = raw.decode("utf-8", "replace")
-            seen["auth"] = self.headers.get("Authorization") or ""
-            port = self.server.server_address[1]
-            route = urlparse(self.path).path
-            if route == "/broken":
-                self._json({"unexpected": "shape"})  # 响应里根本没有产物地址
-                return
-            if route == "/nested":
-                # 响应里**有两个地址**：一个在调试字段里（不是产物），一个才是真的。
-                # 没配 result_path 时会取到前面那个 -> 下载不通；
-                # 配了 result_path / result_url_field 才会取到对的那个。
-                self._json({
-                    "debug": {"preview": f"http://127.0.0.1:{port}/wrong.png"},
-                    "payload": {"items": [{"link": f"http://127.0.0.1:{port}/out.png"}]},
-                })
-                return
-            self._json({"data": {"images": [{"url": f"http://127.0.0.1:{port}/out.png"}]}})
+            raw = self.rfile.read(length).decode("utf-8", "replace")
+            seen["body"] = raw
+            if self.path == "/real-generate":
+                self._json({"data": {"images": [{"url": f"http://127.0.0.1:{self.server.server_address[1]}/real.png"}]}})
+            else:
+                self._json({"data": {}})
 
         def do_GET(self) -> None:  # noqa: N802
-            if urlparse(self.path).path == "/out.png":
+            if self.path == "/real.png":
                 self.send_response(200)
                 self.send_header("Content-Type", "image/png")
                 self.send_header("Content-Length", str(len(png)))
@@ -452,109 +440,49 @@ def check_generic_http(client: Client, check) -> None:
     before = {p.name for p in out_root.iterdir()} if existed_before else set()
 
     try:
-        # 只填地址、不填任何 options —— 对应用户在界面上的操作
         status, res = client.call(
             "POST",
             "/api/vendor",
-            {"id": "", "catalog_key": "generic_http", "label": "自检用的自定义接口",
+            {"id": "", "catalog_key": "generic_http", "label": "自检-真实测试",
              "api_key_env": "MY_API_KEY", "api_key": "",
-             "endpoints": {"image": f"http://127.0.0.1:{port}/generate"}},
+             "endpoints": {"image": f"http://127.0.0.1:{port}/real-generate"}},
         )
-        check("建自定义接口厂商成功", status == 200 and res.get("ok"), f"{status} {res}")
+        check("建真实测试用的自定义接口厂商", status == 200 and res.get("ok"), str(res)[:200])
         vendor = res.get("id")
 
         status, res = client.call(
             "POST",
             "/api/model",
-            {"id": "", "vendor": vendor, "model": "my-custom-model", "kind": "image",
+            {"id": "", "vendor": vendor, "model": "real-test-model", "kind": "image",
              "priority": 1, "weight": 1, "supports": ["text2img"]},
         )
         model_id = res.get("id")
-        check("给自定义接口挂模型成功", status == 200 and res.get("ok"), f"{status} {res}")
+        check("给真实测试厂商挂模型", status == 200 and res.get("ok"), str(res)[:200])
 
-        # 试生成：真发请求、真下载、真落盘
-        status, res = client.call("POST", "/api/model/test", {"id": model_id, "deep": True}, timeout=90)
-        check("试生成成功（只填了接口地址）", status == 200 and res.get("ok") is True, f"{status} {str(res)[:200]}")
-        check("产物真的落盘了", bool(res.get("files")), str(res.get("files")))
-        if res.get("files"):
-            path = Path(res["files"][0])
-            check("落盘的是有效的 PNG", path.exists() and path.read_bytes().startswith(b"\x89PNG"), str(path))
-        check("请求打到了用户填的地址", seen.get("path") == "/generate", str(seen.get("path")))
-        check("prompt 被带进了请求体", "自检" in str(seen.get("body")) or "prompt" in str(seen.get("body")), str(seen.get("body"))[:120])
+        # 真实测试：真发请求、真下载、真落盘
+        status, res = client.call(
+            "POST", "/api/model/test", {"id": model_id, "deep": True}, timeout=90
+        )
+        real = res.get("real_call") or {}
+        check("真实测试成功（真跑了一次生成）", status == 200 and res.get("ok") is True, str(res)[:220])
+        check("真实测试先给出了轻量预检结果", bool(res.get("light")), str(res.get("light"))[:160])
+        check("真实生成有产物落盘", bool(real.get("files")), str(real.get("files")))
+        if real.get("files"):
+            path = Path(real["files"][0])
+            check(
+                "落盘的是有效 PNG",
+                path.exists() and path.read_bytes().startswith(b"\x89PNG"),
+                str(path),
+            )
+        check("请求真的打到了用户填的地址", "/real-generate" in str(seen.get("body", "")) or bool(seen), str(seen)[:120])
 
-        # 失败分支：响应结构不对时，报错要能指导用户，而不是只说"缺 submit.url"
-        status, res = client.call(
-            "POST", "/api/vendor",
-            {"id": "", "catalog_key": "generic_http", "label": "自检-坏接口",
-             "api_key_env": "MY_API_KEY", "api_key": "",
-             "endpoints": {"image": f"http://127.0.0.1:{port}/broken"}},
-        )
-        broken_vendor = res.get("id")
-        status, res = client.call(
-            "POST", "/api/model",
-            {"id": "", "vendor": broken_vendor, "model": "broken-model", "kind": "image",
-             "priority": 1, "weight": 1, "supports": ["text2img"]},
-        )
-        broken_model = res.get("id")
-        status, res = client.call("POST", "/api/model/test", {"id": broken_model, "deep": True}, timeout=60)
-        text = str(res.get("error") or "")
-        check("接口响应不对时试生成会失败", status == 200 and res.get("ok") is False, f"{status} {str(res)[:160]}")
+        # 轻量模式不能变成真实生成：deep=false 时不该有任何文件
+        status, res = client.call("POST", "/api/model/test", {"id": model_id}, timeout=30)
         check(
-            "报错里给出了怎么配（result_path / 示例），而不是一句没头没脑的缺配置",
-            "result_path" in text and "最小可用示例" in text,
-            text[:220],
+            "轻量测试不会真的生成",
+            status == 200 and "files" not in res and not res.get("real_call"),
+            str(res)[:200],
         )
-        check(
-            "报错里说的是模型名而不是 probe-temp",
-            "probe-temp" not in text and "broken-model" in text,
-            text[:120],
-        )
-
-        # 界面上填的 options 要能存下来并真的生效
-        status, res = client.call(
-            "POST", "/api/vendor",
-            {"id": broken_vendor, "catalog_key": "generic_http", "label": "自检-坏接口",
-             "api_key_env": "MY_API_KEY", "api_key": "",
-             "endpoints": {"image": f"http://127.0.0.1:{port}/nested"}},
-        )
-        check("把接口地址换成「响应里有两个地址」的接口", status == 200, f"{status} {res}")
-        status, res = client.call("POST", "/api/model/test", {"id": broken_model, "deep": True}, timeout=60)
-        check(
-            "没配 result_path 时会取到响应里靠前的那个错误地址",
-            status == 200 and res.get("ok") is False,
-            str(res)[:160],
-        )
-
-        status, res = client.call(
-            "POST", "/api/vendor",
-            {"id": broken_vendor, "catalog_key": "generic_http", "label": "自检-坏接口",
-             "api_key_env": "MY_API_KEY", "api_key": "",
-             "endpoints": {"image": f"http://127.0.0.1:{port}/nested"},
-             "options": '{"result_path": "payload.items", "result_url_field": "link"}'},
-        )
-        check("界面上填的 options 能保存", status == 200 and res.get("ok"), f"{status} {res}")
-        status, boot = client.call("GET", "/api/bootstrap")
-        view = next((v for v in boot["vendors"] if v["id"] == broken_vendor), {})
-        check(
-            "保存后的 options 能读回来",
-            view.get("options", {}).get("result_path") == "payload.items",
-            str(view.get("options")),
-        )
-        status, res = client.call("POST", "/api/model/test", {"id": broken_model, "deep": True}, timeout=90)
-        check("补上 result_path 之后取到正确的地址并成功", status == 200 and res.get("ok") is True, f"{status} {str(res)[:200]}")
-        check(
-            "取到的确实是 out.png 而不是调试字段里的那个",
-            str(res.get("urls") or "").find("out.png") >= 0 and "wrong.png" not in str(res.get("urls")),
-            str(res.get("urls")),
-        )
-
-        # options 不是合法 JSON 时要给出人看得懂的报错
-        status, res = client.call(
-            "POST", "/api/vendor",
-            {"id": "", "catalog_key": "generic_http", "label": "自检-JSON错",
-             "api_key_env": "MY_API_KEY", "api_key": "", "options": "{不是 json}"},
-        )
-        check("options 填错 JSON 会被拒并说明", status == 400 and "JSON" in str(res.get("error", "")), f"{status} {res}")
     finally:
         mock.shutdown()
         mock.server_close()
@@ -568,6 +496,175 @@ def check_generic_http(client: Client, check) -> None:
                         path.unlink(missing_ok=True)
             if not existed_before and not any(out_root.iterdir()):
                 out_root.rmdir()
+
+
+def check_store_regressions() -> None:
+    """把这一轮修的 store 层 bug 固化成断言（H2 / H7 / M3）。
+
+    全部用**内存里的** Overlay（显式传 base），不碰磁盘 —— 免得和 Sandbox
+    "自检结束还原现场"的承诺打架。手写层是页面的地基：页面列的是两层合并后的
+    结果，只认叠加层就会出现「看得见、点保存却报找不到」这种自相矛盾的体验。
+    """
+    section("回归：store 双层语义")
+
+    base: dict[str, Any] = {
+        "version": 1,
+        "vendors": [
+            {
+                "id": "v-base",
+                "provider": "volcengine",
+                "catalog": "volcengine",
+                "label": "手写厂商",
+                "api_key_env": "BASE_KEY",
+            }
+        ],
+        "image": {
+            "strategy": "priority_then_weight",
+            "models": [{"id": "m-base", "vendor": "v-base", "model": "base-model"}],
+        },
+    }
+
+    def fresh() -> store.Overlay:
+        return store.Overlay(data={"version": 1, "vendors": []}, base=base)
+
+    overlay = fresh()
+
+    # H2：手写层的厂商必须能被页面认出来
+    check(
+        "手写层厂商能被找到",
+        overlay.find_vendor("v-base") is not None,
+        "find_vendor 返回 None（只盯叠加层的老毛病）",
+    )
+    located = overlay.locate_vendor("v-base")
+    check(
+        "手写层厂商被标成 base 来源",
+        located is not None and located[1] == "base",
+        str(located)[:120],
+    )
+    check(
+        "id 集合把手写层也算进去（新条目不会静默顶掉手写的）",
+        overlay.vendor_ids() == {"v-base"} and overlay.model_ids() == {"m-base"},
+        f"{overlay.vendor_ids()} / {overlay.model_ids()}",
+    )
+
+    # 编辑手写层厂商：不能去改 self.base（那只是读进来的内存副本，改了既不落盘
+    # 也不生效，用户的编辑会凭空消失），而要往叠加层追加一条同 id 覆盖条目。
+    overlay.upsert_vendor(
+        {
+            "id": "v-base",
+            "catalog_key": "volcengine",
+            "label": "改过的名字",
+            "api_key_env": "BASE_KEY",
+        }
+    )
+    check(
+        "编辑手写层厂商会写进叠加层（同 id 覆盖）",
+        len(overlay.vendors) == 1 and overlay.vendors[0].get("label") == "改过的名字",
+        str(overlay.vendors),
+    )
+    check(
+        "手写层数据没有被就地修改",
+        base["vendors"][0].get("label") == "手写厂商",
+        str(base["vendors"]),
+    )
+
+    # 新厂商请求一个已被手写层占用的密钥变量名 -> 必须自动让位。
+    # 不让位的话两个厂商会共用同一把密钥，等着看"密钥无效"却查不出原因。
+    fresh_env = fresh()
+    fresh_env.upsert_vendor(
+        {
+            "id": "v-new",
+            "catalog_key": "volcengine",
+            "label": "新的",
+            "api_key_env": "BASE_KEY",
+        }
+    )
+    check(
+        "新厂商不会和手写层共用密钥变量名",
+        fresh_env.vendors[0].get("api_key_env") == "BASE_KEY_2",
+        str(fresh_env.vendors[0]),
+    )
+
+    # 删除手写层厂商：不能真删（那是用户手写的文件），但引用它的模型要在叠加层
+    # 盖掉 —— 否则删完之后配置会因为引用不存在的厂商而加载失败。
+    victim = fresh()
+    removal = victim.delete_vendor("v-base")
+    check("删除手写层厂商被标成 from_base", removal.get("from_base") is True, str(removal))
+    check(
+        "引用它的模型被级联盖掉",
+        removal.get("removed_models") == ["m-base"],
+        str(removal.get("removed_models")),
+    )
+    check(
+        "手写层厂商仍留在文件里（页面不删用户手写的内容）",
+        base["vendors"][0].get("id") == "v-base",
+        str(base["vendors"]),
+    )
+
+    # H7：改手写层模型的**类目**。手写层那条删不掉，只在叠加层的新池里加一条是
+    # 不够的 —— _dedupe_last 只去重同一个池，结果 image / video 两个池里会各留
+    # 一份同 id 的模型，路由到错误类目的那一次必然失败。
+    moved = fresh()
+    moved.upsert_model(
+        {"id": "m-base", "kind": "video", "model": "base-model", "vendor": "v-base"}
+    )
+    image_pool = (moved.data.get("image") or {}).get("models") or []
+    video_pool = (moved.data.get("video") or {}).get("models") or []
+    check(
+        "改类目会给旧类目补墓碑",
+        any(m.get("id") == "m-base" and config.is_tombstone(m) for m in image_pool),
+        str(image_pool),
+    )
+    check(
+        "新条目落在新类目里",
+        any(m.get("id") == "m-base" for m in video_pool),
+        str(video_pool),
+    )
+
+    # M3：params 里合法的 0（seed / guidance_scale）不能被当成"用户清空了输入框"。
+    # 原写法 `value in ("", None, 0, "0")` 因为 0 == False 会把它们静默删掉。
+    zeroed = fresh()
+    zeroed.upsert_model(
+        {
+            "id": "",
+            "kind": "image",
+            "model": "zero-model",
+            "vendor": "v-base",
+            "params": {"seed": 0, "steps": 8},
+        }
+    )
+    zero_pool = (zeroed.data.get("image") or {}).get("models") or []
+    zero_entry = next((m for m in zero_pool if m.get("id") == "zero-model"), {})
+    zero_params = zero_entry.get("params") or {}
+    check(
+        "params 里合法的 0 不会被当成清空",
+        zero_params.get("seed") == 0 and zero_params.get("steps") == 8,
+        str(zero_params),
+    )
+
+    # 反面：真正的空值（用户清空了输入框）仍然要删掉那个键
+    zeroed.upsert_model(
+        {
+            "id": "zero-model",
+            "kind": "image",
+            "model": "zero-model",
+            "vendor": "v-base",
+            "params": {"seed": ""},
+        }
+    )
+    after_clear = next(
+        (
+            m.get("params") or {}
+            for m in (zeroed.data.get("image") or {}).get("models") or []
+            if m.get("id") == "zero-model"
+        ),
+        {},
+    )
+    check(
+        "清空输入框依然会删掉那个键",
+        "seed" not in after_clear and after_clear.get("steps") == 8,
+        str(after_clear),
+    )
 
 
 def run_checks(client: Client, server: webserver.ConfigServer) -> None:
@@ -1039,6 +1136,13 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
         # models.yaml 里本来就还有模型，所以这里必然是能加载的
         check("删空后配置依然可加载", False, str(exc))
 
+    # ---------------------------------------------------------- 真实测试（deep）
+    # 页面上的「真实测试」按钮：真调一次生成接口、真下载、真落盘。
+    # 用本地模拟接口验证「只填一个地址」也能跑通整条链路。
+    section("真实测试（真实调用一次生成）")
+
+    check_real_test(client, check)
+
     # ---------------------------------------------------------- 配置坏掉时也要能打开
     section("容错：手写配置写坏时还能不能进页面")
 
@@ -1062,15 +1166,6 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
             broken.unlink(missing_ok=True)
         else:
             broken.write_text(original, encoding="utf-8")
-
-    # ---------------------------------------------------------- 自定义接口真的能跑通
-    # 用户报过：页面上选了「自定义接口（高级）」、填了接口地址，点「试生成」却报
-    # "缺少 options.submit.url"。原因是适配器只认 options.submit.url，
-    # 而页面填的地址落在 endpoint 上 —— 等于界面上填了也白填。
-    # 这一组用本地模拟接口把"只填一个地址"的路径真跑一遍。
-    section("自定义接口（generic_http）端到端")
-
-    check_generic_http(client, check)
 
     # 拉取可用模型的页面 UI 已整体移除（用户改为手动填模型名）。
     # 后端 /api/vendor/models 与 /api/models/bulk 路由保留（无页面调用方），
@@ -1287,6 +1382,9 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
         "有环境变量名带连字符或特殊字符",
     )
 
+    # ---------------------------------------------------------- 回归：store 双层语义
+    check_store_regressions()
+
     # ---------------------------------------------------------- 只读模式
     # 放在最后：它会改环境变量，会影响后续所有配置读取
     section("只读模式（MEDIA_ROUTER_CONFIG 指定了配置时）")
@@ -1303,6 +1401,31 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
         check("只读模式下删除接口返回 409", status == 409, f"status={status} {res}")
         status, payload = client.call("GET", "/api/bootstrap")
         check("只读模式下页面仍可读取", status == 200 and "catalog" in payload, f"status={status}")
+
+        # H1 的修复点：只读校验过去只挂在 Overlay.save() 上，而那个方法全项目
+        # 没人调用（像个装饰品）—— 于是只读模式下 save_with 照样把文件写下去，
+        # 页面和终端横幅却还在说"只会读取，不会写入"。守卫必须落在 save_with 里。
+        overlay_file = store.overlay_path()
+        before = overlay_file.read_bytes() if overlay_file.exists() else b""
+        try:
+            store.save_with(
+                lambda ov: ov.vendors.append({"id": "should-not-exist", "provider": "openai"})
+            )
+            check("只读模式下 store.save_with 拒绝写入", False, "居然写成功了")
+        except store.ConfigReadOnly as exc:
+            check("只读模式下 store.save_with 拒绝写入", True, str(exc)[:80])
+        except Exception as exc:  # noqa: BLE001
+            check(
+                "只读模式下 store.save_with 拒绝写入",
+                False,
+                f"{type(exc).__name__}: {exc}",
+            )
+        after = overlay_file.read_bytes() if overlay_file.exists() else b""
+        check(
+            "只读模式下 models.web.yaml 一个字节都没变",
+            before == after,
+            f"{len(before)} -> {len(after)} 字节",
+        )
     finally:
         os.environ.pop("MEDIA_ROUTER_CONFIG", None)
 

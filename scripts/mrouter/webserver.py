@@ -184,17 +184,13 @@ class ConfigApi:
         vendor_id = str(body.get("vendor_id") or "").strip()
         if not vendor_id:
             raise ApiError("缺少参数 vendor_id")
-        raw = store.read_overlay()
-        item = next(
-            (
-                v
-                for v in (raw.get("vendors") or [])
-                if isinstance(v, dict) and str(v.get("id")) == vendor_id
-            ),
-            None,
-        )
-        if item is None:
+        # 在两层里找 —— 手写层里的厂商也会显示在页面上，拉列表时当然也要认，
+        # 只读 models.web.yaml 的话，手写厂商点「拉取模型列表」必然报找不到。
+        overlay = store.load_overlay()
+        found = overlay.locate_vendor(vendor_id)
+        if found is None:
             raise ApiError(f"找不到厂商：{vendor_id}")
+        item, _layer = found
         target = self._target_from_payload(
             {
                 "catalog_key": item.get("catalog") or item.get("provider"),
@@ -322,39 +318,61 @@ class ConfigApi:
         model_id = str(body.get("id") or "").strip()
         if not model_id:
             raise ApiError("缺少参数 id")
-        enabled = bool(body.get("enabled", True))
+        enabled = config.coerce_enabled(body.get("enabled", True))
         result = store.save_with(lambda overlay: overlay.set_enabled(model_id, enabled))
         return {"ok": True, **result}
 
     def model_test(
         self, _query: dict[str, list[str]], body: dict[str, Any]
     ) -> dict[str, Any]:
+        """连通性测试，两种模式：
+
+        - 默认（轻量）：只调只读端点验接口可达与密钥，不生成、不花钱。
+        - ``deep=true``（真实测试）：真跑一次生成，验证「提交→推理→下载→落盘」
+          整条链路。会消耗额度，页面已弹确认框。
+        """
         cfg = self._config()
         entry, kind, model_name = self._resolve_model_for_test(body)
+        target = self._target_from_payload(
+            {
+                "catalog_key": entry.get("catalog"),
+                "api_key_env": entry.get("api_key_env"),
+                "endpoints": entry.get("endpoints") or {},
+                "provider": entry.get("provider"),
+                "options": entry.get("options") or {},
+                "vendor_id": entry.get("vendor_id") or "",
+                "api_key": body.get("api_key") or "",
+            }
+        )
 
         if not body.get("deep"):
-            target = self._target_from_payload(
-                {
-                    "catalog_key": entry.get("catalog"),
-                    "api_key_env": entry.get("api_key_env"),
-                    "endpoints": entry.get("endpoints") or {},
-                    "provider": entry.get("provider"),
-                    "options": entry.get("options") or {},
-                    "vendor_id": entry.get("vendor_id") or "",
-                    "api_key": body.get("api_key") or "",
-                }
-            )
             return probe.probe_target(
                 cfg, target, kind=kind, model_name=model_name
             ).to_dict()
 
-        # 深度测试：真跑一次生成，会消耗额度。页面已弹过确认框。
-        vendors = config.build_vendors(store.read_overlay().get("vendors"))
+        # 真实测试：先轻量预检（不花钱），通过后再真生成一次。
+        # 返回 {ok, light, real_call}，预检就失败时如实说明、不再花钱。
+        light = probe.probe_target(
+            cfg, target, kind=kind, model_name=model_name
+        ).to_dict()
+        if not light.get("ok"):
+            return {
+                "ok": False,
+                "light": light,
+                "real_call": {"ok": False, "error": "轻量预检未通过，未执行真实生成"},
+            }
+
+        # 真实测试要构造一个完整的 ModelSpec，厂商条目得**两层都算** ——
+        # 手写层里的模型经常用 vendor: v-xxx 引用手写层的厂商。
+        overlay = store.load_overlay()
+        vendors = config.build_vendors(
+            list(overlay.vendors) + overlay.base_vendors()
+        )
         spec = config.build_spec_from_entry(
             kind,
             {
-                # 把模型自己的 provider / api_key_env / endpoint / params 一并带上 ——
-                # 手写层里的模型没有厂商条目可继承，光给 vendor 是构造不出 spec 的
+                # 手写层里的模型没有厂商条目可继承，provider / api_key_env /
+                # endpoint / params 都得带上，否则构造不出 spec
                 "id": entry.get("model_id") or "probe-temp",
                 "vendor": entry.get("vendor_id") or "",
                 "provider": entry.get("provider") or "",
@@ -369,7 +387,7 @@ class ConfigApi:
             },
             vendors,
         )
-        result = probe.deep_probe(
+        real = probe.deep_probe(
             cfg,
             spec,
             prompt=str(body.get("prompt") or ""),
@@ -377,7 +395,7 @@ class ConfigApi:
             poll_interval=_as_float(cfg.defaults.get("poll_interval_seconds"), 5.0),
             max_poll=_as_float(cfg.defaults.get("max_poll_seconds"), 300.0),
         )
-        return result
+        return {"ok": bool(real.get("ok")), "light": light, "real_call": real}
 
     # ---------- 内部 ----------
 
@@ -753,42 +771,53 @@ def _make_handler(app: ConfigServer) -> type[BaseHTTPRequestHandler]:
 
         # ---------- 分发 ----------
 
+        def _reject(self, status: int, message: str) -> None:
+            """拒绝一个请求，并**断开连接**。
+
+            拒绝可能发生在读 body 之前 —— keep-alive 连接上残留的请求体会被
+            当成下一个请求的开头，直接串包。所以这时候只能断开，不能留着复用。
+            顺带也省掉了"先替可疑请求读满 2 MiB 再拒绝"的开销。
+            """
+            self.close_connection = True
+            self._error(status, message)
+
         def _handle(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
             query = parse_qs(parsed.query, keep_blank_values=True)
 
-            # 先读完请求体再判权限：带上 body 的请求如果在鉴权处就返回，
-            # keep-alive 连接上残留的字节会被当成下一个请求，直接串包。
+            # 先查来源，再读 body：Host/Origin/令牌都不需要请求体，
+            # 没必要为一个来路不明的请求先把 2 MiB 读进内存。
+            if not self._host_ok():
+                self._reject(403, "请求的 Host 不是本机地址，已拒绝（防 DNS 重绑定）")
+                return
+            if not self._origin_ok():
+                self._reject(403, "请求来源不是本页面，已拒绝（防跨站请求）")
+                return
+            if path == "/favicon.ico":
+                self._send(204, b"")
+                return
+            if path not in ("/", "/index.html") and not path.startswith("/api/"):
+                self._reject(404, f"没有这个地址：{path}")
+                return
+            if path.startswith("/api/") and not self._token_ok():
+                self._reject(
+                    401, "缺少或错误的访问令牌，请从终端里那条带 token 的链接打开页面"
+                )
+                return
+
             body: dict[str, Any] = {}
             if self.command in ("POST", "PUT", "PATCH"):
                 body = self._body()
-
-            if not self._host_ok():
-                self._error(403, "请求的 Host 不是本机地址，已拒绝（防 DNS 重绑定）")
-                return
-            if not self._origin_ok():
-                self._error(403, "请求来源不是本页面，已拒绝（防跨站请求）")
-                return
 
             # 页面自身
             if path in ("/", "/index.html"):
                 self._send(200, app._render_page().encode("utf-8"), "text/html; charset=utf-8")
                 return
-            if path == "/favicon.ico":
-                self._send(204, b"")
-                return
-
-            if not path.startswith("/api/"):
-                self._error(404, f"没有这个地址：{path}")
-                return
-            if not self._token_ok():
-                self._error(401, "缺少或错误的访问令牌，请从终端里那条带 token 的链接打开页面")
-                return
 
             if path == "/api/file":
                 if self.command not in ("GET", "HEAD"):
-                    self._error(405, "方法不允许")
+                    self._reject(405, "方法不允许")
                     return
                 self._serve_file(query)
                 return
@@ -802,9 +831,9 @@ def _make_handler(app: ConfigServer) -> type[BaseHTTPRequestHandler]:
             if name is None:
                 allowed = [m for m, p in ROUTES if p == path]
                 if allowed:
-                    self._error(405, f"这个地址只支持 {'/'.join(allowed)}")
+                    self._reject(405, f"这个地址只支持 {'/'.join(allowed)}")
                 else:
-                    self._error(404, f"没有这个接口：{path}")
+                    self._reject(404, f"没有这个接口：{path}")
                 return
 
             result = getattr(app.api, name)(query, body)

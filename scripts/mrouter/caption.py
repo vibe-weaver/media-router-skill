@@ -136,16 +136,22 @@ def mp4_duration(path: Path) -> float | None:
 
 
 def _extract_frame(video_path: Path) -> Path | None:
-    """如果环境里有 ffmpeg，抽一帧给 VLM 用；没有就跳过描述。"""
+    """如果环境里有 ffmpeg，抽一帧给 VLM 用；没有就跳过描述。
+
+    返回值是**临时文件**，调用方用完要删（见 vlm_caption 的 finally）。
+    """
     import shutil
     import subprocess
     import tempfile
+    import uuid
 
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return None
     try:
-        out = Path(tempfile.gettempdir()) / f"mr_frame_{video_path.stem}.jpg"
+        # 用随机名：原来用 video_path.stem 命名，不同目录下的同名视频会互相覆盖，
+        # 而且那些文件从来没人清理，会在系统临时目录里一直攒着。
+        out = Path(tempfile.gettempdir()) / f"mr_frame_{uuid.uuid4().hex}.jpg"
         subprocess.run(
             [ffmpeg, "-y", "-loglevel", "error", "-i", str(video_path), "-frames:v", "1", str(out)],
             check=True,
@@ -226,6 +232,12 @@ def _caption_key(cfg: RouterConfig, raw: dict[str, Any]) -> str:
     return ""
 
 
+#: 一次 VLM 请求里所有图片的原始字节上限。
+#: 没有这个上限时，三张 4MB 的 PNG 会被 base64 成约 16MB 塞进一个请求里，
+#: 网关基本都会拒（413），而失败信息只会是一句笼统的"视觉模型调用失败"。
+MAX_CAPTION_BYTES = 8 * 1024 * 1024
+
+
 def vlm_caption(
     cfg: RouterConfig,
     files: list[str],
@@ -247,6 +259,7 @@ def vlm_caption(
         return "", f"未找到 caption 密钥：{env_name}"
 
     targets: list[Path] = []
+    temp_frames: list[Path] = []
     for item in files[:3]:
         path = Path(item)
         if kind == "image":
@@ -255,51 +268,74 @@ def vlm_caption(
             frame = _extract_frame(path)
             if frame:
                 targets.append(frame)
+                temp_frames.append(frame)
     if not targets:
         return "", "没有可送入视觉模型的图像（视频需要 ffmpeg 抽帧）"
 
-    prompt_text = str(raw.get("prompt") or DEFAULT_CAPTION_PROMPT)
-    if goal:
-        prompt_text += f"\n（背景：这张图服务于以下任务，描述时请侧重相关细节）{goal}"
+    try:
+        total_bytes = 0
+        for path in targets:
+            try:
+                total_bytes += path.stat().st_size
+            except OSError:
+                continue
+        if total_bytes > MAX_CAPTION_BYTES:
+            return "", (
+                f"要送进视觉模型的图共 {_human_size(total_bytes)}，超过 "
+                f"{_human_size(MAX_CAPTION_BYTES)} 的上限（base64 后还会再涨约三分之一），"
+                f"大概率会被平台拒绝。请调小生成尺寸或减少数量，"
+                f"也可以把 defaults.caption.mode 改成 metadata 只回元数据。"
+            )
 
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt_text}]
-    for path in targets:
+        prompt_text = str(raw.get("prompt") or DEFAULT_CAPTION_PROMPT)
+        if goal:
+            prompt_text += f"\n（背景：这张图服务于以下任务，描述时请侧重相关细节）{goal}"
+
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt_text}]
+        for path in targets:
+            try:
+                data = base64.b64encode(path.read_bytes()).decode("ascii")
+            except OSError as exc:
+                return "", f"读取图片失败：{exc}"
+            mime = guess_content_type(path)
+            content.append(
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}
+            )
+
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": 0.2,
+        }
         try:
-            data = base64.b64encode(path.read_bytes()).decode("ascii")
-        except OSError as exc:
-            return "", f"读取图片失败：{exc}"
-        mime = guess_content_type(path)
-        content.append(
-            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}
-        )
+            resp = request(
+                "POST",
+                endpoint,
+                headers={"Authorization": f"Bearer {key}"},
+                json_body=payload,
+                timeout=timeout,
+                max_retries=1,
+            )
+        except Exception as exc:  # noqa: BLE001 - 描述失败不阻断主流程
+            return "", f"视觉模型调用失败：{exc}"
 
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": content}],
-        "temperature": 0.2,
-    }
-    try:
-        resp = request(
-            "POST",
-            endpoint,
-            headers={"Authorization": f"Bearer {key}"},
-            json_body=payload,
-            timeout=timeout,
-            max_retries=1,
-        )
-    except Exception as exc:  # noqa: BLE001 - 描述失败不阻断主流程
-        return "", f"视觉模型调用失败：{exc}"
-
-    data = resp.json() or {}
-    try:
-        text = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        return "", f"视觉模型响应异常：{json.dumps(data, ensure_ascii=False)[:200]}"
-    if isinstance(text, list):
-        text = " ".join(
-            part.get("text", "") for part in text if isinstance(part, dict)
-        )
-    return str(text).strip(), ""
+        data = resp.json() or {}
+        try:
+            text = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            return "", f"视觉模型响应异常：{json.dumps(data, ensure_ascii=False)[:200]}"
+        if isinstance(text, list):
+            text = " ".join(
+                part.get("text", "") for part in text if isinstance(part, dict)
+            )
+        return str(text).strip(), ""
+    finally:
+        # 抽出来的帧是临时文件，用完就删，别在系统临时目录里攒着
+        for frame in temp_frames:
+            try:
+                frame.unlink()
+            except OSError:
+                pass
 
 
 def build_caption(

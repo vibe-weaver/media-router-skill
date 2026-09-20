@@ -11,7 +11,7 @@
   generate   真正执行生成
   report     手工上报某个模型的成败（用于外部调用后回写健康度）
   health     看/清健康度
-  web        打开本机网页配置界面（给不写配置文件的用户准备）
+  web        打开本机网页配置界面（配置 + 连通性检测都在这里）
 """
 
 from __future__ import annotations
@@ -28,9 +28,11 @@ from .adapters import (
     Ctx,
     GenRequest,
     GenResult,
+    HttpError,
     known_providers,
     run_adapter,
 )
+from . import catalog
 from .caption import build_caption, caption_enabled, profile_files
 from .config import ConfigError, RouterConfig, load_config
 from .health import HealthStore
@@ -98,6 +100,9 @@ def _parse_params(pairs: list[str] | None) -> dict[str, Any]:
 def _requires_key(spec: Any) -> bool:
     """这个模型是否需要 API Key。
 
+    三处判断（这里 / 目录条目的 keyless / 探测时的 resolve_key）必须口径一致，
+    否则会出现"页面说不用密钥、命令行说缺密钥"这种自相矛盾的提示。
+
     generic_http 是配置驱动的：只有显式声明了鉴权方式才需要密钥，
     `auth: {type: none}` 或不写 auth 都视为公开接口。
     """
@@ -105,6 +110,10 @@ def _requires_key(spec: Any) -> bool:
         return False
     opts = spec.options if isinstance(spec.options, dict) else {}
     if opts.get("keyless") is True:
+        return False
+    # 目录里标了 keyless 的平台（内置工具通道），一律不需要密钥
+    entry = catalog.get(catalog.guess_key(spec.provider, spec.endpoint))
+    if entry is not None and entry.keyless:
         return False
     auth = opts.get("auth") or {}
     kind = str((auth.get("type") if isinstance(auth, dict) else "") or "").strip().lower()
@@ -158,6 +167,9 @@ def _plan(
         planned.append(spec)
         if not spec.is_native:
             spent += 1
+    # native 必须排在最后。它是兜底，一旦排在前面，第一轮就 delegate 交还给
+    # agent 了，后面那些真模型根本没机会被尝试（排序稳定，其余顺序不变）。
+    planned.sort(key=lambda spec: 1 if spec.is_native else 0)
     return planned, skipped
 
 
@@ -281,7 +293,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
     threshold, cooldown = cfg.health_policy()
 
     out_dir = Path(args.output_dir).expanduser() if args.output_dir else cfg.output_dir
-    if args.kind == "image" and out_dir is not None:
+    if out_dir is not None:
+        # 图、视频都先建好目录。以前只给 image 建，video 靠 download()
+        # 内部顺手 mkdir 兜底 —— 能跑通，但"这个目录到底什么时候被创建"
+        # 变得取决于走哪条分支，出问题时很难推理。
         out_dir.mkdir(parents=True, exist_ok=True)
 
     ordered, notes = _resolve(cfg, health, args)
@@ -300,8 +315,6 @@ def cmd_generate(args: argparse.Namespace) -> int:
         output_dir=None if args.no_download else out_dir,
         extra=_parse_params(args.param),
     )
-    if req.extra.get("last_image"):
-        req.images = list(req.images)
 
     trail: list[dict[str, Any]] = []
     notes_out: list[str] = list(cfg.warnings)
@@ -402,6 +415,22 @@ def cmd_generate(args: argparse.Namespace) -> int:
             )
         except Exception as exc:  # noqa: BLE001 - 任何 provider 异常都要能降级
             message = f"{type(exc).__name__}: {exc}"
+            status = exc.status if isinstance(exc, HttpError) else None
+            if status in (401, 403):
+                # 密钥无效 / 无权限是**配置问题**，和 ConfigError 一样不计熔断。
+                # 一把填错的密钥会把所有候选逐个打成冷却，而冷却对"配置错"
+                # 毫无意义（下次还是同样的错），只会把后续排查搅浑。
+                _log(f"{label} 密钥被拒绝（HTTP {status}）：{message}")
+                trail.append(
+                    {
+                        "model": spec.id,
+                        "provider": spec.provider,
+                        "error": message,
+                        "kind": "config",
+                        "elapsed_ms": int((time.time() - attempt_started) * 1000),
+                    }
+                )
+                continue
             _log(f"{label} 失败：{message}")
             outcome = health.record_failure(spec.id, message, threshold, cooldown)
             entry = {
@@ -461,8 +490,8 @@ def cmd_health(args: argparse.Namespace) -> int:
     cfg = load_config()
     health = HealthStore(cfg.health_path)
     if args.reset:
+        # reset() 内部已经落盘，这里不用再 save 一次
         health.reset(args.model)
-        health.save()
     ids: list[str] = []
     for pool in cfg.pools.values():
         ids.extend(m.id for m in pool.models)
@@ -616,7 +645,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_web = sub.add_parser(
         "web",
         parents=[common],
-        help="打开本机网页配置界面（添加厂商、填 Key、配模型与权重）",
+        help="打开本机网页配置界面（添加厂商、填 Key、配模型与权重、测试连通性）",
     )
     p_web.add_argument("--port", type=int, default=8760, help="端口，默认 8760")
     p_web.add_argument(
@@ -648,9 +677,6 @@ def main(argv: list[str] | None = None) -> int:
         return int(args.func(args))
     except ConfigError as exc:
         _emit({"status": "error", "error": str(exc), "kind": "config"}, args.pretty)
-        return EXIT_ERROR
-    except KeyboardInterrupt:
-        _log("已中断。")
         return EXIT_ERROR
     except KeyboardInterrupt:
         _emit({"status": "error", "error": "被中断"}, getattr(args, "pretty", False))
