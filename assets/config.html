@@ -453,6 +453,7 @@ details.pathbar .paths{
     <div class="actions" data-page-node-id="V4rFlhumRkzFfsjvHkSrhE">
       <button class="primary" id="btn-save-model" data-page-node-id="VVFQ7HqK8XuKgq1Yo8B7FC">保存模型</button>
       <button id="btn-test-model" data-page-node-id="19XLoVZR31XpGz2VZhbwof">测试连通性</button>
+      <button id="btn-real-test-model" data-page-node-id="rtestmodel001">真实测试</button>
       <button id="btn-cancel-model" data-page-node-id="0gQYEfkrbaO3zH0pjpgSun">取消</button>
     </div>
   </div>
@@ -906,7 +907,7 @@ function onVendorPick(){
   el("mf-model-hint").textContent = keep
     ? "模型名按 models.yaml 里写的填。"
     : (listNote
-        || "以厂商控制台里显示的模型名为准，手动填写，用「测试连通性」确认。");
+        || "以厂商控制台里显示的模型名为准，手动填写。");
   el("model-suggestions").innerHTML = e
     ? kindList((e.suggestions && e.suggestions[pick.kind]) || [])
     : "";
@@ -1029,24 +1030,51 @@ async function saveModel(){
   finally{ btn.disabled = false; }
 }
 
-async function testModel(deep, box, payload){
+async function testModel(box, payload, deep){
+  /* 两种模式：
+     轻量（默认）—— 只读预检，不花钱；
+     真实（deep）—— 真生成一次，验证提交→推理→下载→落盘全链路，消耗额度。 */
+  if(deep){
+    const ok = await uiConfirm(
+      "真实测试确认",
+      "将真实生成一次来验证全链路（提交→推理→下载→落盘），会消耗少量额度。继续吗？",
+      "开始真实测试"
+    );
+    if(!ok) return;
+  }
   box.innerHTML = '<div class="note"><span class="spin"></span>'+
-    (deep?"正在真实生成一次，请稍等（会消耗额度）…":"正在测试…（不会生成任何内容，不消耗额度）")+'</div>';
+    (deep ? "正在真实生成一次（会消耗额度，请稍等）…"
+          : "正在测试…（不会生成任何内容，不消耗额度）")+'</div>';
   try{
-    const res = await api("/api/model/test", {method:"POST", body:JSON.stringify(Object.assign({},payload,{deep:deep}))});
+    const res = await api("/api/model/test", {
+      method:"POST", body:JSON.stringify(Object.assign({}, payload, {deep: !!deep}))
+    });
     if(deep){
-      let html = '<div class="note '+(res.ok?"":"err")+'"><span class="badge '+(res.ok?"ok":"err")+'">'+
-        (res.ok?"试生成成功":"试生成失败")+'</span> '+esc(res.ok ? "这个模型确实可以用了。" : (res.error||""))+'</div>';
-      if(res.hint) html += '<div class="hint">'+esc(res.hint)+'</div>';
-      if(res.note) html += '<div class="hint">'+esc(res.note)+'</div>';
-      if(res.files && res.files.length){
-        const f = res.files[0];
+      let html = "";
+      if(res.light){
+        html += '<div class="note"><span class="badge '+(res.light.ok?"ok":"err")+
+          '">轻量预检</span> '+esc(res.light.summary||"")+'</div>';
+      }
+      const real = res.real_call || {};
+      if(real.ok){
+        html += '<div class="note"><span class="badge ok">真实测试通过</span> '+
+          '这个模型确实可用，全链路已跑通。</div>';
+      }else{
+        html += '<div class="note err"><span class="badge err">真实测试失败</span> '+
+          esc(real.error || res.error || "")+'</div>';
+      }
+      if(real.hint) html += '<div class="hint">'+esc(real.hint)+'</div>';
+      if(real.note) html += '<div class="hint">'+esc(real.note)+'</div>';
+      if(real.files && real.files.length){
+        const f = real.files[0];
         html += '<div class="hint mono" style="margin-top:8px">'+esc(f)+'</div>';
         const low = String(f).toLowerCase();
         if(/\.(png|jpe?g|webp|gif)$/.test(low)){
-          html += '<img class="preview" src="/api/file?path='+encodeURIComponent(f)+'&t='+encodeURIComponent(TOKEN)+'" alt="试生成结果">';
+          html += '<img class="preview" src="/api/file?path='+encodeURIComponent(f)+
+            '&t='+encodeURIComponent(TOKEN)+'" alt="真实测试产物">';
         }else if(/\.(mp4|webm)$/.test(low)){
-          html += '<video class="preview" controls src="/api/file?path='+encodeURIComponent(f)+'&t='+encodeURIComponent(TOKEN)+'"></video>';
+          html += '<video class="preview" controls src="/api/file?path='+encodeURIComponent(f)+
+            '&t='+encodeURIComponent(TOKEN)+'"></video>';
         }
       }
       box.innerHTML = html;
@@ -1178,6 +1206,14 @@ el("vendor-list").addEventListener("click", ev => guarded("厂商操作", async 
 el("btn-add-model").addEventListener("click", ()=>showModelForm(null));
 el("btn-cancel-model").addEventListener("click", ()=>{ el("model-form").style.display="none"; });
 el("btn-save-model").addEventListener("click", saveModel);
+el("btn-test-model").addEventListener("click", ()=>{
+  try{ testModel(el("mf-result"), collectModelPayload(), false); }
+  catch(e){ showError(e.message); }
+});
+el("btn-real-test-model").addEventListener("click", ()=>{
+  try{ testModel(el("mf-result"), collectModelPayload(), true); }
+  catch(e){ showError(e.message); }
+});
 el("mf-vendor").addEventListener("change", onVendorPick);
 el("mf-size-preset").addEventListener("change", onSizePresetChange);
 el("mf-weight-range").addEventListener("input", ()=>{
@@ -1197,10 +1233,6 @@ document.querySelectorAll("#model-form .pick[data-kind]").forEach(p=>{
     ev.preventDefault();
     setKind(p.dataset.kind);
   });
-});
-el("btn-test-model").addEventListener("click", ()=>{
-  try{ testModel(false, el("mf-result"), collectModelPayload()); }
-  catch(e){ showError(e.message); }
 });
 el("model-list").addEventListener("click", ev => guarded("模型操作", async ()=>{
   const btn = ev.target.closest("button[data-act]");
@@ -1233,10 +1265,8 @@ el("model-list").addEventListener("click", ev => guarded("模型操作", async (
     return;
   }
   if(act==="test-model"){
-    const found = findModelById(mid);
-    if(!found) return;
     const box = resultBoxAfter(btn.closest(".mitem"), "model:"+mid);
-    await testModel(false, box, {id:mid});
+    await testModel(box, {id:mid});
   }
 }));
 el("model-list").addEventListener("change", ev => guarded("切换模型状态", async ()=>{

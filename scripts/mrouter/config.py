@@ -28,24 +28,25 @@ def _dir_from_env(name: str, default: Path) -> Path:
 #: 自检、试验、多环境隔离时就不会碰到用户真实的 models.yaml / secrets.yaml。
 CONFIG_DIR = _dir_from_env("MEDIA_ROUTER_CONFIG_DIR", SKILL_DIR / "config")
 STATE_DIR = _dir_from_env("MEDIA_ROUTER_STATE_DIR", SKILL_DIR / "state")
-#: 产物默认目录。三级选择（前者优先）：
+#: 产物默认目录。两级选择（前者优先）：
 #:   1. 环境变量 MEDIA_ROUTER_OUTPUT_DIR —— 部署/测试隔离用
 #:   2. 当前工作目录 ./outputs —— **默认值**。很多 agent 沙箱把 skill 目录设为只读，
 #:      落盘到 cwd（= 用户的工作区）产物才能被用户看到、后续步骤才能引用。
-#:   3. <skill>/outputs —— cwd 不可写时的兜底（直接终端里运行、无沙箱场景同 2）。
+#: 目录**不在 import 时创建**（见 _resolve_default_output_dir），真正落盘时再建。
+#: 另外 <skill>/outputs 仍被 /api/file 列为可预览目录，用来兼容早期版本的产物。
 
 
 def _resolve_default_output_dir() -> Path:
+    """只**计算**产物目录，不创建它。
+
+    以前这里顺手 `mkdir` 了，于是"只是 import 一下模块"也会在当前工作目录里
+    凭空多出一个 outputs/ —— 副作用不该发生在 import 期。真正需要目录的
+    地方（download / _write_b64_to_local）自己会 mkdir，那里失败也能如实报错。
+    """
     raw = os.environ.get("MEDIA_ROUTER_OUTPUT_DIR")
     if raw:
         return Path(raw).expanduser()
-    cwd_out = Path.cwd() / "outputs"
-    try:
-        cwd_out.mkdir(parents=True, exist_ok=True)
-        return cwd_out
-    except OSError:
-        # cwd 只读（沙箱/受限环境）：退回 skill 目录
-        return SKILL_DIR / "outputs"
+    return Path.cwd() / "outputs"
 
 
 DEFAULT_OUTPUT_DIR = _resolve_default_output_dir()
@@ -197,6 +198,19 @@ class RouterConfig:
     warnings: list[str] = field(default_factory=list)
     vendors: dict[str, Vendor] = field(default_factory=dict)
     overlay_path: Path | None = None
+    #: 已经记过的告警原文。resolve_api_key 这类"查询方法"可能被反复调用，
+    #: 没有这层去重的话 warnings 会无限增长、同一句话在输出里出现好几遍。
+    _warned: set[str] = field(default_factory=set, repr=False)
+
+    def __post_init__(self) -> None:
+        # 构造时已经带的告警也要进"已记"集合，否则 warn() 可能重复追加同一句话
+        self._warned.update(self.warnings)
+
+    def warn(self, message: str) -> None:
+        """追加一条告警；同一句话只记一次。"""
+        if message and message not in self._warned:
+            self._warned.add(message)
+            self.warnings.append(message)
 
     # ---------- 查询 ----------
 
@@ -253,7 +267,9 @@ class RouterConfig:
             if spec.api_key_env in secrets_keys and secrets_keys[spec.api_key_env]:
                 return str(secrets_keys[spec.api_key_env]).strip(), f"secrets 文件 [{spec.api_key_env}]"
         else:
-            self.warnings.append(f"模型 {spec.id} 未设置 api_key_env，只能从 secrets 文件按 id 取键")
+            self.warn(
+                f"模型 {spec.id} 未设置 api_key_env，只能从 secrets 文件按 id 取键"
+            )
 
         if spec.id in secrets_keys and secrets_keys[spec.id]:
             return str(secrets_keys[spec.id]).strip(), f"secrets 文件 [{spec.id}]"
@@ -282,6 +298,21 @@ class RouterConfig:
             },
             "warnings": list(self.warnings),
         }
+
+
+def coerce_enabled(value: Any) -> bool:
+    """把配置里写的 enabled 归一成布尔。
+
+    **空值（写了键没写值）按"启用"处理。** 早期用的是
+    ``entry.get("enabled", True)`` —— 键存在、值为 None 时默认值不生效，
+    bool(None) 变成 False，于是一行没写完的 `enabled:` 会让模型静默停用，
+    用户只看到"没有可用模型"，完全查不出原因。
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "no", "0", "off")
+    return bool(value)
 
 
 def _coerce_spec(
@@ -321,13 +352,28 @@ def _coerce_spec(
     if not endpoint and vendor:
         endpoint = str(vendor.endpoints.get(kind) or "").strip()
 
-    # 厂商级 options 打底，模型级覆盖
+    # 厂商级 options 打底，模型级覆盖。
+    # options / params 必须是映射 —— 写成列表时 dict(...) 会抛 TypeError，
+    # 那会被 CLI 归成"内部错误"，用户根本看不出是自己配置写错了。
+    raw_options = entry.get("options")
+    if raw_options is not None and not isinstance(raw_options, dict):
+        raise ConfigError(
+            f"模型 {model_id} 的 options 必须是映射（key: value），"
+            f"实际是 {type(raw_options).__name__}"
+        )
     options: dict[str, Any] = {}
     if vendor:
         options.update(vendor.options or {})
-    options.update(entry.get("options") or {})
+    options.update(raw_options or {})
     if entry.get("api_key"):
         options["api_key"] = entry["api_key"]
+
+    raw_params = entry.get("params")
+    if raw_params is not None and not isinstance(raw_params, dict):
+        raise ConfigError(
+            f"模型 {model_id} 的 params 必须是映射（key: value），"
+            f"实际是 {type(raw_params).__name__}"
+        )
 
     supports_raw = entry.get("supports") or []
     if isinstance(supports_raw, str):
@@ -370,10 +416,6 @@ def _coerce_spec(
         warnings.append(f"模型 {model_id} 的 weight 为负，已归零")
         weight = 0.0
 
-    enabled = entry.get("enabled", True)
-    if isinstance(enabled, str):
-        enabled = enabled.strip().lower() not in ("false", "no", "0", "off")
-
     return ModelSpec(
         id=str(model_id),
         provider=provider,
@@ -381,11 +423,11 @@ def _coerce_spec(
         model=str(entry.get("model") or model_id),
         priority=priority,
         weight=weight,
-        enabled=bool(enabled),
+        enabled=coerce_enabled(entry.get("enabled", True)),
         supports=supports,
         api_key_env=api_key_env,
         endpoint=endpoint,
-        params=dict(entry.get("params") or {}),
+        params=dict(raw_params or {}),
         options=options,
         raw=dict(entry),
         vendor=vendor_id,
@@ -415,6 +457,17 @@ def _coerce_vendors(raw: Any, warnings: list[str]) -> dict[str, Vendor]:
             if isinstance(endpoints_raw, dict)
             else {}
         )
+        options_raw = entry.get("options")
+        if options_raw is not None and not isinstance(options_raw, dict):
+            raise ConfigError(
+                f"厂商 {vendor_id} 的 options 必须是映射，"
+                f"实际是 {type(options_raw).__name__}"
+            )
+        if vendor_id in vendors:
+            # 同 id 只保留最后一条（叠加层覆盖手写层，语义和模型一致）。
+            # 静默丢一个厂商很难查，所以在 _merge_config 里按 id 去重后再到这里，
+            # 真出现重复就说明同一份文件里写了两遍 —— 那也只需要提示一次。
+            warnings.append(f"厂商 id {vendor_id} 在同一份配置里定义了多次，只有最后一条生效")
         vendors[vendor_id] = Vendor(
             id=vendor_id,
             provider=provider,
@@ -422,7 +475,7 @@ def _coerce_vendors(raw: Any, warnings: list[str]) -> dict[str, Vendor]:
             api_key_env=str(entry.get("api_key_env") or "").strip(),
             catalog=str(entry.get("catalog") or "").strip(),
             endpoints=endpoints,
-            options=dict(entry.get("options") or {}),
+            options=dict(options_raw or {}),
             note=str(entry.get("note") or "").strip(),
             raw=dict(entry),
         )
@@ -469,13 +522,19 @@ def _config_paths(allow_missing: bool = False) -> tuple[list[Path], Path | None]
 
 
 def _merge_pool(base_pool: Any, overlay_pool: Any) -> dict[str, Any]:
+    """同一个类目的两层合并：标量后者胜，models 列表按"底层在前、叠加层在后"拼接。
+
+    只在**至少有一层真的写了 models** 时才生成 models 键 —— 否则把一个普通
+    字典硬塞一个空 models 进去，会被 load_config 当成一个空模型池。
+    """
     base_dict = dict(base_pool) if isinstance(base_pool, dict) else {}
     overlay_dict = dict(overlay_pool) if isinstance(overlay_pool, dict) else {}
     merged = dict(base_dict)
     merged.update(overlay_dict)
-    merged["models"] = list(base_dict.get("models") or []) + list(
-        overlay_dict.get("models") or []
-    )
+    if "models" in base_dict or "models" in overlay_dict:
+        merged["models"] = list(base_dict.get("models") or []) + list(
+            overlay_dict.get("models") or []
+        )
     return merged
 
 
@@ -495,10 +554,21 @@ def _merge_config(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, An
             out["defaults"] = merged_defaults
             continue
         if key == "vendors":
-            out["vendors"] = list(base.get("vendors") or []) + list(value or [])
+            # 按 id 去重、后者胜（叠加层覆盖手写层，与 models 的语义保持一致）。
+            # 早期是简单拼接，同 id 会在 _coerce_vendors 里互相盖掉，
+            # 哪个生效取决于顺序，用户会莫名其妙少一个厂商。
+            out["vendors"] = _dedupe_last(
+                list(base.get("vendors") or []) + list(value or [])
+            )
             continue
-        if isinstance(value, dict) and "models" in value:
-            out[key] = _merge_pool(base.get(key), value)
+        base_node = base.get(key)
+        # 叠加层里只有 strategy 没写 models 时，**不能**整体覆盖 ——
+        # 那会把手写层里这一整个类目的模型全部抹掉。
+        if isinstance(value, dict) and (
+            "models" in value
+            or (isinstance(base_node, dict) and isinstance(base_node.get("models"), list))
+        ):
+            out[key] = _merge_pool(base_node, value)
             continue
         out[key] = value
     return out
@@ -525,23 +595,33 @@ def _dedupe_last(items: list[Any]) -> list[Any]:
     带 ``_deleted: true`` 的条目是**墓碑**：配置页面要删掉一条写在 models.yaml
     里的模型，但它不能去改用户手写的文件，于是在叠加层里放一条同 id 的墓碑把
     手写层那条盖掉。墓碑在合并后就被丢掉，不会进入任何下游逻辑。
+
+    **形状不对的条目一律原样透传，绝不在这里静默丢弃。** 早期版本把"不是 dict"
+    和"没有 id"的条目收进一个 no_id 列表然后……没有返回它，于是
+    ``models: [{provider: x}]``（漏了 id）会凭空消失，用户看到一个空池子却
+    没有任何提示。现在这些条目会走到 _coerce_spec，由它给出"第 N 条缺少必填
+    字段 id"这类可读错误。
     """
-    order: list[str] = []
+    order: list[tuple[str, Any]] = []
     by_id: dict[str, Any] = {}
-    no_id: list[Any] = []
     for entry in items:
-        key = str((entry or {}).get("id") or "")
+        if not isinstance(entry, dict):
+            order.append(("raw", entry))
+            continue
+        key = str(entry.get("id") or "")
         if not key:
-            no_id.append(entry)
+            order.append(("raw", entry))
             continue
         if key not in by_id:
-            order.append(key)
+            order.append(("id", key))
         by_id[key] = entry
-    return [
-        by_id[k]
-        for k in order
-        if not (isinstance(by_id[k], dict) and is_tombstone(by_id[k]))
-    ]
+    out: list[Any] = []
+    for kind, item in order:
+        if kind == "raw":
+            out.append(item)
+        elif not is_tombstone(by_id[item]):
+            out.append(by_id[item])
+    return out
 
 
 def visible_entries(entries: list[Any]) -> list[Any]:
@@ -774,10 +854,17 @@ def load_raw(allow_missing: bool = False) -> tuple[dict[str, Any], list[Path], P
 
 
 def lint_files(paths: list[Path] | None = None, overlay: Path | None = None) -> list[str]:
-    """对所有参与加载的文件做一次原文体检（见 lint_text）。"""
+    """对所有参与加载的文件做一次原文体检（见 lint_text）。
+
+    注意 ``_config_paths`` 返回的 paths **已经包含** overlay，所以这里必须去重 ——
+    否则叠加层会被体检两遍，同一句告警在页面/输出里各出现两次。
+    """
     if paths is None:
         paths, overlay = _config_paths(allow_missing=True)
-    targets = list(paths) + ([overlay] if overlay else [])
+    targets: list[Path] = []
+    for path in list(paths) + ([overlay] if overlay else []):
+        if path not in targets:
+            targets.append(path)
     out: list[str] = []
     for path in targets:
         if path.suffix.lower() not in (".yaml", ".yml"):

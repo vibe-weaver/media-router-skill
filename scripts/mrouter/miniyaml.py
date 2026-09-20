@@ -445,6 +445,29 @@ def _needs_quote(text: str) -> bool:
     return False
 
 
+def _render_float(value: float) -> str:
+    """浮点的文本形式，必须能被 _to_number（以及 PyYAML）读回成浮点。
+
+    YAML 1.1 的浮点**要求有小数点**：`1.0e+20` 是浮点，`1e+20` 是字符串。
+    而 Python 的 repr(1e20) 恰好就是 '1e+20' —— 直接写出去，回读就变成字符串，
+    再往下就当成参数发给接口了（那边只会给你一个 400）。
+    所以指数形式统一补成 '1.0e+20' 这种形状；inf/nan 用 YAML 自己的 .inf/.nan。
+    """
+    if value != value:  # NaN
+        return ".nan"
+    if value == float("inf"):
+        return ".inf"
+    if value == float("-inf"):
+        return "-.inf"
+    text = repr(value)
+    mantissa, sep, exponent = text.partition("e")
+    if not sep:
+        mantissa, sep, exponent = text.partition("E")
+    if sep and "." not in mantissa:
+        mantissa += ".0"
+    return f"{mantissa}e{exponent}" if sep else mantissa
+
+
 def _render_scalar(value: Any) -> str:
     if value is None:
         return "null"
@@ -452,7 +475,9 @@ def _render_scalar(value: Any) -> str:
         return "true"
     if value is False:
         return "false"
-    if isinstance(value, (int, float)):
+    if isinstance(value, float):
+        return _render_float(value)
+    if isinstance(value, int):
         return repr(value)
     text = str(value)
     if _needs_quote(text):
@@ -482,7 +507,10 @@ def _render_key(key: Any) -> str:
     return f'"{escaped}"'
 
 
-_EMPTY = {dict: "{}", list: "[]"}
+def _empty_literal(value: Any) -> str:
+    """空容器的写法。用 isinstance 而不是查 type(value) ——
+    dict/list 的子类（OrderedDict 之类）查表会直接 KeyError。"""
+    return "{}" if isinstance(value, dict) else "[]"
 
 
 def _dump_node(node: Any, indent: int, out: list[str]) -> None:
@@ -497,7 +525,7 @@ def _dump_node(node: Any, indent: int, out: list[str]) -> None:
                 out.append(f"{pad}{name}:")
                 _dump_node(value, indent + 2, out)
             elif isinstance(value, (dict, list)):
-                out.append(f"{pad}{name}: {_EMPTY[type(value)]}")
+                out.append(f"{pad}{name}: {_empty_literal(value)}")
             else:
                 out.append(f"{pad}{name}: {_render_scalar(value)}")
         return
@@ -517,7 +545,7 @@ def _dump_node(node: Any, indent: int, out: list[str]) -> None:
                         # 列表项里键的正文从 pad+2 开始，子级再缩 2
                         _dump_node(value, indent + 4, out)
                     elif isinstance(value, (dict, list)):
-                        out.append(f"{prefix}: {_EMPTY[type(value)]}")
+                        out.append(f"{prefix}: {_empty_literal(value)}")
                     else:
                         out.append(f"{prefix}: {_render_scalar(value)}")
                     first = False

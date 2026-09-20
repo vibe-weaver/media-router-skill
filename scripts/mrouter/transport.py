@@ -172,7 +172,12 @@ def download(
     headers: dict[str, str] | None = None,
     timeout: float = 300.0,
 ) -> Path:
-    """下载远程产物到本地文件。"""
+    """下载远程产物到本地文件。**先写 .part 再原子改名。**
+
+    直接以最终文件名边下边写，一旦中途断流/被 Ctrl-C/磁盘满，磁盘上就会留下
+    一个名字正常、内容截断的"产物"；而重试时 _unique_path 只会另起一个 -1 后缀，
+    那半截文件就永远留在 outputs 里，用户拿它当生成结果引用，后面全错。
+    """
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     final_headers = {"User-Agent": USER_AGENT}
@@ -180,21 +185,33 @@ def download(
         if value is not None:
             final_headers[key] = str(value)
 
+    tmp = dest.parent / f"{dest.name}.{os.getpid()}.part"
+
+    def _drop() -> None:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
     req = urllib.request.Request(url, headers=final_headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp, dest.open("wb") as fh:
+        with urllib.request.urlopen(req, timeout=timeout) as resp, tmp.open("wb") as fh:
             while True:
                 chunk = resp.read(1024 * 256)
                 if not chunk:
                     break
                 fh.write(chunk)
     except urllib.error.HTTPError as exc:
+        _drop()
         raise HttpError(f"下载失败 HTTP {exc.code}：{url}", exc.code) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        _drop()
         raise HttpError(f"下载失败：{exc} ({url})") from exc
 
-    if not dest.exists() or dest.stat().st_size == 0:
+    if not tmp.exists() or tmp.stat().st_size == 0:
+        _drop()
         raise HttpError(f"下载得到空文件：{url}")
+    tmp.replace(dest)
     return dest
 
 

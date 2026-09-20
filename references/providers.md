@@ -90,14 +90,31 @@
 
 ## dashscope — 阿里云百炼（通义万相）
 
-异步任务：提交拿 `task_id`，再轮询 `/api/v1/tasks/{id}`。脚本内部已实现轮询，
-并对 429/5xx 自动重试。
+异步任务：提交拿 `task_id`，再轮询 `/tasks/{id}`（前缀跟着你填的 `endpoint` 走，
+见下面的 `options.task_base`）。脚本内部已实现轮询，并对 429/5xx 自动重试。
 
 | 字段 | 说明 |
 |---|---|
 | `api_key_env` | 建议 `DASHSCOPE_API_KEY` |
 | `endpoint` | 图片默认 `.../services/aigc/text2image/image-synthesis`；视频默认 `.../services/aigc/video-generation/video-synthesis` |
 | `params` | 图片：`size`（如 `1024*1024`）、`style`、`prompt_extend`、`watermark`；视频：`size`、`duration` |
+| `options.task_base` | 任务**查询**地址的前缀，默认从 `endpoint` 自动推导（见下）；推不出来时才需要手填 |
+
+如果 `endpoint` 指的是中转网关或自建代理，查询地址会**自动跟着走**：
+脚本把提交地址里的 `/services/…` 切掉当作 base，再拼 `/tasks/{id}`。所以填
+`https://你的网关/api/v1/services/aigc/video-generation/video-synthesis`，
+轮询就会打到 `https://你的网关/api/v1/tasks/{id}` —— 不会偷偷直连官方域名。
+
+万一你的网关地址里没有 `/services/` 这一段（推不出来），脚本会退回官方地址，并在日志里
+提醒你显式指定：
+
+```yaml
+  options:
+    task_base: https://你的网关/api/v1
+```
+
+时长优先级：`--param duration=N`（点名了字段）> `--duration N` > 模型条目里的 `params.duration`。
+三处都不写就是"不指定"，请求里不带该字段，由平台用默认值（万相默认 5 秒）。
 
 ```yaml
 - id: wanx-2.5
@@ -231,6 +248,46 @@
 想精确控制模型入参，用 `options.inputs` 或命令行 `--param key=value`，
 它们会合并进 `input` 对象。
 
+### 入参合并顺序（replicate / fal 通用）
+
+`input` 对象（fal 是请求体顶层）由这几处按**低 → 高**优先级合并而成：
+
+```
+params  <  options.inputs  <  --param key=value  <  req.extra.inputs
+```
+
+也就是说，命令行点名了哪个字段，就一定用命令行的值。
+
+### `--duration` / `--count` 落到哪个字段
+
+Replicate 各家模型的时长字段名并不统一（`duration`、`num_frames`、`video_length` 都有），
+所以默认按最常见的 `duration` 注入，并允许用两个 `options` 覆盖：
+
+| 字段 | 默认 | 适用 | 说明 |
+|---|---|---|---|
+| `options.duration_field` | `duration` | 仅视频 | `--duration N` 写进哪个入参字段；填 `none`/`false` 关闭（会留日志，不会静默忽略） |
+| `options.count_field` | `num_outputs` | 仅图片 | `--count N` 写进哪个入参字段；仅在 `N > 1` 时注入 |
+
+**两个旗标都按 kind 收紧**：`--duration` 只注入视频请求、`--count` 只注入图片请求。
+因为 `num_outputs` / `num_images` 本质是出图参数，塞进视频请求只会换来 422 ——
+kind 不匹配时宁可不发，并留一行日志说明（不是静默忽略）。确有多产物需求时用
+`--param <字段名>=N` 点名。
+
+字段名对不上（比如 `wan-*` 用 `num_frames`）时，直接点名最稳：
+
+```bash
+--param num_frames=81        # 比 --duration 更具体，优先级更高
+```
+
+```yaml
+# 字段名固定的模型可以一次性写进条目
+- id: wan-i2v
+  provider: replicate
+  model: wan-video/wan-2.2-i2v-fast
+  options:
+    duration_field: num_frames
+```
+
 ---
 
 ## fal — fal.ai
@@ -250,6 +307,11 @@
 ```
 
 图生视频时把输入图放 `--image`，脚本会填到 `image_url` 字段。
+
+入参合并顺序、`--duration` / `--count` 的字段映射与 replicate **完全一致**
+（见上一节的"入参合并顺序"）。差别只在计数字段的默认名：fal 是 `num_images`
+（replicate 是 `num_outputs`）。字段名不一致时同样用 `options.duration_field` /
+`options.count_field` 覆盖，或用 `--param` 点名。
 
 ---
 
