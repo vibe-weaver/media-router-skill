@@ -342,6 +342,65 @@ def check_page_js(page: Any) -> None:
         _m.group(1)[:120] if _m else "找不到 model-suggestions 赋值语句",
     )
 
+    # 引用的完整性：页面是单文件，JS 里的 id 名字写错、handler 改名后忘了改绑定，
+    # node --check 全都查不出来（语法没问题），只在浏览器里变成"点了没反应"。
+    # 实测踩过：把 onSizePresetChange 拆成三个通用函数后，绑定那行还留着旧名字。
+    _script = _re.search(r"<script>([\s\S]*?)</script>", str(page))
+    _js = _script.group(1) if _script else ""
+    _shorthand = sorted(set(_re.findall(r'\bel\(\s*"([^"]+)"\s*\)', _js)))
+    # 元素可以是静态写在 HTML 里的，也可以是 JS 里建出来再赋 id 的（toast / 弹窗遮罩），
+    # 所以两种都认，只要 id 在页面上出现过。
+    _orphan = [
+        name
+        for name in _shorthand
+        if not _re.search(r'\bid\s*=\s*["\']' + _re.escape(name) + r'["\']', str(page))
+    ]
+    check(
+        f"el() 引用的元素都真实存在（查了 {len(_shorthand)} 个）",
+        not _orphan,
+        f"页面里找不到这些 id：{_orphan}",
+    )
+    # 具名 handler（非箭头函数）必须同名函数存在，否则绑定即失效
+    _named = sorted(
+        set(
+            _re.findall(
+                r'addEventListener\(\s*"[^"]+"\s*,\s*([A-Za-z_$][\w$]*)\s*[,)]', _js
+            )
+        )
+    )
+    _undef = [name for name in _named if f"function {name}(" not in str(page)]
+    check(
+        f"addEventListener 绑的具名 handler 都有定义（查了 {len(_named)} 个）",
+        not _undef,
+        f"这些 handler 没定义：{_undef}",
+    )
+
+    # 生成规格：三个「预设下拉 + 自定义手填框」都必须有手填兜底。
+    # 原来只有尺寸有，清晰度/时长是纯 select —— params 里存了非预设值时，回填被
+    # 浏览器丢弃成空串，再保存就把用户配的参数静默删掉。
+    for _sel, _custom in (
+        ("mf-size-preset", "mf-size-custom"),
+        ("mf-resolution", "mf-resolution-custom"),
+        ("mf-duration", "mf-duration-custom"),
+    ):
+        check(
+            f"{_sel} 有配套的自定义手填框 {_custom}",
+            f'id="{_custom}"' in str(page)
+            and f'value="custom"' in str(page)
+            and f'el("{_custom}")' in _js,
+            f"缺 {_custom} 或没有「自定义…」分支",
+        )
+        check(
+            f"{_sel} 的下拉切换会同步自定义框的显示",
+            f'onPresetChange("{_sel}","{_custom}")' in _js,
+            f"{_sel} 没有接 onPresetChange",
+        )
+    check(
+        "回填走 fillPreset（值不在预设里就落到「自定义…」）",
+        _js.count("fillPreset(") >= 4,  # 1 处定义 + 3 处调用
+        f"fillPreset 出现 {_js.count('fillPreset(')} 次",
+    )
+
 
 def main() -> int:
     print("media-router Web 配置自检")
@@ -665,6 +724,159 @@ def check_store_regressions() -> None:
         "seed" not in after_clear and after_clear.get("steps") == 8,
         str(after_clear),
     )
+
+
+def check_store_regressions_round2() -> None:
+    """第二轮审查修掉的 store 层 bug。
+
+    同样全部用内存里的 Overlay，不碰磁盘。
+    """
+    import contextlib
+    import shutil
+    import tempfile
+
+    section("回归：store 删除语义与文件格式")
+
+    base: dict[str, Any] = {
+        "version": 1,
+        "vendors": [
+            {
+                "id": "v-base",
+                "provider": "volcengine",
+                "catalog": "volcengine",
+                "label": "手写厂商",
+                "api_key_env": "BASE_KEY",
+            }
+        ],
+        "image": {
+            "strategy": "priority_then_weight",
+            "models": [{"id": "m-base", "vendor": "v-base", "model": "base-model"}],
+        },
+    }
+
+    def fresh(**data: Any) -> store.Overlay:
+        return store.Overlay(data={"version": 1, **data}, base=base)
+
+    # A1：删手写层的模型时，原写法只往叠加层的**新池**里补墓碑，而手写层那个池子
+    # 还在；合并是"先拼接、再去重"，两条同 id 条目里手写层那条活下来 —— 页面报
+    # "已删除"，模型却还在列表里。改类目（H7）补对了，删除这条路漏了。
+    hidden = fresh()
+    result = hidden.delete_model("m-base")
+    image_pool = (hidden.data.get("image") or {}).get("models") or []
+    check(
+        "删手写层模型会写墓碑（不是「已删除」却还在）",
+        any(m.get("id") == "m-base" and config.is_tombstone(m) for m in image_pool),
+        str(image_pool),
+    )
+    check(
+        "手写层模型被删后会从合并结果里消失",
+        all(m.get("id") != "m-base" for _kind, m in hidden.all_models()),
+        str(hidden.all_models()),
+    )
+    check(
+        "返回里如实说明这是「藏起来」而不是真删",
+        result.get("hidden") is True and "config/models.yaml" in str(result.get("message", "")),
+        str(result)[:160],
+    )
+
+    # A3：删手写层厂商同理 —— 页面删了，合并后厂商还在（引用它的模型已经级联盖掉，
+    # 用户看到的是"厂商还在、模型没了"）。要写厂商墓碑。
+    gone = fresh()
+    vendor_removal = gone.delete_vendor("v-base")
+    check(
+        "删手写层厂商会写墓碑",
+        any(
+            v.get("id") == "v-base" and config.is_tombstone(v)
+            for v in (gone.data.get("vendors") or [])
+        ),
+        str(gone.data.get("vendors")),
+    )
+    check(
+        "手写层厂商被删后会从合并结果里消失",
+        config.visible_entries([*gone.base_vendors(), *gone.vendors]) == []
+        and gone.overlay_vendors() == [],
+        str(config.visible_entries([*gone.base_vendors(), *gone.vendors])),
+    )
+    check(
+        "返回里如实说明原因",
+        vendor_removal.get("from_base") is True
+        and "config/models.yaml" in str(vendor_removal.get("message", "")),
+        str(vendor_removal)[:160],
+    )
+
+    # 同一个 id 重新加回来：墓碑必须被摘掉，否则新加的厂商一保存就"消失"
+    gone.upsert_vendor(
+        {"id": "v-base", "catalog_key": "volcengine", "label": "重新加的", "api_key_env": "K"}
+    )
+    check(
+        "重新添加同 id 的厂商会把墓碑摘掉",
+        any(v.get("id") == "v-base" and not config.is_tombstone(v) for v in gone.vendors)
+        and not any(config.is_tombstone(v) for v in (gone.data.get("vendors") or [])),
+        str(gone.data.get("vendors")),
+    )
+
+    # A10：_ensure_pool 原来用整块 `node = {...}` 覆盖，把用户选的 strategy 冲掉。
+    # 用户改成 weight_only，存一次模型就变回 priority_then_weight。
+    keep = fresh(image={"strategy": "weight_only", "models": []})
+    keep.upsert_model({"id": "", "kind": "image", "model": "x", "vendor": "v-base"})
+    check(
+        "存模型不会把池子的 strategy 冲掉",
+        (keep.data.get("image") or {}).get("strategy") == "weight_only",
+        str(keep.data.get("image")),
+    )
+    # 反向：类目节点整个缺失时仍然要补出默认结构
+    blank = store.Overlay(data={"version": 1}, base={"vendors": base["vendors"]})
+    blank.upsert_model({"id": "", "kind": "video", "model": "y", "vendor": "v-base"})
+    check(
+        "类目节点缺失时会补出默认结构",
+        (blank.data.get("video") or {}).get("strategy") == "priority_then_weight"
+        and len((blank.data.get("video") or {}).get("models") or []) == 1,
+        str(blank.data.get("video")),
+    )
+    # 反面：models 写成了别的形状（手改坏了）不能被当成合法列表
+    broken = store.Overlay(
+        data={"version": 1, "image": {"strategy": "weight_only", "models": 5}},
+        base={"vendors": base["vendors"]},
+    )
+    broken.upsert_model({"id": "", "kind": "image", "model": "z", "vendor": "v-base"})
+    check(
+        "models 写成标量时补成列表、strategy 不受影响",
+        (broken.data.get("image") or {}).get("models")[0].get("id") == "z"
+        and (broken.data.get("image") or {}).get("strategy") == "weight_only",
+        str(broken.data.get("image")),
+    )
+
+    # A2：叠加层是 .json 时必须写真正的 JSON。原写法一律走 miniyaml.dumps，
+    # 于是 models.web.json 里躺着 YAML —— 下次 json.loads 直接炸，页面再也打不开。
+    scratch = Path(tempfile.mkdtemp(prefix="media-router-write-"))
+    try:
+        for name, header in (("models.web.json", "// 注释\n"), ("models.web.yaml", "# 注释\n")):
+            target = scratch / name
+            store.write_structured(target, {"version": 1, "image": {"models": []}}, header)
+            text = target.read_text(encoding="utf-8")
+            if name.endswith(".json"):
+                # 不要让解析异常冲出去：那样整轮自检会在这里中断，后面的断言一条都
+                # 不跑，反而把"写坏了 JSON"这个明确结论伪装成"自检崩了"。
+                try:
+                    parsed = json.loads(text)
+                except ValueError:
+                    parsed = None
+                check(
+                    "叠加层是 .json 时写出的是真 JSON",
+                    isinstance(parsed, dict)
+                    and parsed.get("version") == 1
+                    and "// 注释" not in text,
+                    text[:80],
+                )
+            else:
+                check(
+                    "叠加层是 .yaml 时仍然写 YAML 并保留注释头",
+                    text.startswith("# 注释") and "version: 1" in text,
+                    text[:80],
+                )
+    finally:
+        with contextlib.suppress(OSError):
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 def run_checks(client: Client, server: webserver.ConfigServer) -> None:
@@ -1069,9 +1281,21 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
         spec = cfg.find_model(image_id)
         check("模型从厂商继承了 provider", spec.provider == "volcengine", spec.provider)
         check("模型从厂商继承了 api_key_env", spec.api_key_env == "ARK_API_KEY", spec.api_key_env)
+        overlay_raw = config.read_structured(store.overlay_path()) or {}
+        ark_entry = next(
+            (v for v in (overlay_raw.get("vendors") or []) if v.get("id") == ark_id), {}
+        )
         check(
             "官方默认地址不写进文件（升级 skill 后能自动用上新地址）",
-            spec.endpoint == "",
+            not ark_entry.get("endpoints"),
+            str(ark_entry),
+        )
+        # 上一条只在"加载端会按 catalog 把默认地址补回来"时才成立 ——
+        # 少了那一步，spec.endpoint 就是空串，适配器回落到 provider 的内置默认
+        # 地址：智谱 / 硅基流动的 provider 都是 openai，请求会被发到 api.openai.com。
+        check(
+            "文件里没写地址时，运行时按目录补回该平台的默认地址",
+            spec.endpoint == catalog.get("volcengine").endpoints["image"],
             spec.endpoint,
         )
         check(
@@ -1384,6 +1608,7 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
 
     # ---------------------------------------------------------- 回归：store 双层语义
     check_store_regressions()
+    check_store_regressions_round2()
 
     # ---------------------------------------------------------- 只读模式
     # 放在最后：它会改环境变量，会影响后续所有配置读取

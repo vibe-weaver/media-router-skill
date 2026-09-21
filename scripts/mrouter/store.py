@@ -117,6 +117,36 @@ def _unique_env(base: str, taken: set[str]) -> str:
     return f"{base}_{index}"
 
 
+def coerce_options(raw: Any) -> dict[str, Any]:
+    """把调用方送来的 options 归一成 dict。
+
+    配置页面的"接口参数"输入框是文本框，``collectOptions()`` 返回的是**原始
+    字符串**；终端调用方则直接送 dict。两条路都要认。
+
+    只认 dict 的话，同一个表单"保存"能成、点"测试连通性"直接崩
+    （``dict("...")`` 抛 ``ValueError: dictionary update sequence element #0
+    has length 1; 2 is required``，页面只显示一句看不懂的 400），
+    用户完全看不出这两处差在哪。形状彻底不对时报可读的配置错误。
+    """
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise config.ConfigError(
+                f"接口参数不是合法的 JSON：{exc.msg}（第 {exc.lineno} 行第 {exc.colno} 列）"
+            ) from exc
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise config.ConfigError(
+            f"接口参数必须是 JSON 对象（{{...}}），实际是 {type(raw).__name__}"
+        )
+    return {str(k): v for k, v in raw.items()}
+
+
 # ---------------------------------------------------------------- 叠加层读写
 
 
@@ -147,15 +177,24 @@ def write_structured(path: Path, data: dict[str, Any], header: str) -> None:
 
     一律用内置 miniyaml 序列化，而不是环境里碰巧装了的 PyYAML ——
     同一份配置在不同机器上写出来的格式必须一模一样。
+
+    **后缀是 ``.json`` 时必须写 JSON。** ``overlay_path()`` 会沿用已存在的后缀，
+    而这里原来不管后缀一律写"注释头 + YAML"：用户手上有一个 models.web.json 的话，
+    页面上第一次保存就把它写成非法 JSON，之后 load_config 报
+    "models.web.json 不是合法的 JSON"，CLI 和配置页面一起打不开 ——
+    而元凶就是页面自己，用户没法自救。JSON 没有注释语法，头部只能不写。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    body = miniyaml.dumps(data)
+    if path.suffix.lower() == ".json":
+        text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    else:
+        text = header + miniyaml.dumps(data)
     # tmp 名带上 pid。_WRITE_LOCK 只管得住本进程：两个进程（比如终端里跑
     # generate 的同时开着配置页面）写同一个 tmp 再各自 replace，后写进去的
     # 内容会被前一个 replace 顺手覆盖掉，且没有任何报错。
     tmp = path.parent / f"{path.name}.{os.getpid()}.tmp"
     try:
-        tmp.write_text(header + body, encoding="utf-8")
+        tmp.write_text(text, encoding="utf-8")
         tmp.replace(path)  # 原子替换，避免写一半被读到
     except OSError:
         try:
@@ -216,9 +255,39 @@ class Overlay:
             return []
         return [v for v in raw if isinstance(v, dict) and v.get("id")]
 
+    def overlay_vendors(self) -> list[dict[str, Any]]:
+        """叠加层里**活着**的厂商条目（墓碑不算）。
+
+        厂商和模型一样有墓碑：删掉一条写在 models.yaml 里的厂商时，页面不能去改
+        用户手写的文件，只能在叠加层放一条 ``_deleted: true`` 把它盖掉。
+        所有"找厂商"的地方都必须跳过墓碑，否则删掉的厂商在页面上又找得到。
+        """
+        return [
+            item
+            for item in self.vendors
+            if isinstance(item, dict) and not config.is_tombstone(item)
+        ]
+
+    def _drop_vendor_tombstone(self, vendor_id: str) -> None:
+        """把某个厂商的墓碑清掉（用户重新加回来 / 改回来时用）。"""
+        self.data["vendors"] = [
+            v
+            for v in self.vendors
+            if not (
+                isinstance(v, dict)
+                and str(v.get("id")) == vendor_id
+                and config.is_tombstone(v)
+            )
+        ]
+
+    def _write_vendor_tombstone(self, vendor_id: str) -> None:
+        """在叠加层写一条厂商墓碑，把手写层里的同 id 条目盖掉。"""
+        self._drop_vendor_tombstone(vendor_id)
+        self.vendors.append({"id": vendor_id, config.TOMBSTONE_KEY: True})
+
     def locate_vendor(self, vendor_id: str) -> tuple[dict[str, Any], str] | None:
         """返回 (条目, 来源)：来源是 ``"overlay"``（能真改）或 ``"base"``（只能覆盖）。"""
-        for item in self.vendors:
+        for item in self.overlay_vendors():
             if str(item.get("id")) == vendor_id:
                 return item, "overlay"
         for item in self.base_vendors():
@@ -229,7 +298,7 @@ class Overlay:
     def _used_env_names(self, except_id: str) -> set[str]:
         """两层里已经被占用的密钥变量名（排除自己）。"""
         out: set[str] = set()
-        for item in self.vendors + self.base_vendors():
+        for item in self.overlay_vendors() + self.base_vendors():
             if str(item.get("id")) == except_id:
                 continue
             value = item.get("api_key_env")
@@ -250,7 +319,7 @@ class Overlay:
         生成新厂商 id 时同样要避开手写层 —— 撞车的话 `_merge_config` 会留下
         同 id 的两条，合并时后者把前者整个盖掉，用户会莫名其妙少一个厂商。
         """
-        return {str(item.get("id")) for item in self.vendors} | {
+        return {str(item.get("id")) for item in self.overlay_vendors()} | {
             str(item.get("id")) for item in self.base_vendors()
         }
 
@@ -311,9 +380,14 @@ class Overlay:
 
     def _ensure_pool(self, kind: str) -> list[dict[str, Any]]:
         node = self.data.get(kind)
-        if not isinstance(node, dict) or not isinstance(node.get("models"), list):
+        if not isinstance(node, dict):
             node = {"strategy": "priority_then_weight", "models": []}
             self.data[kind] = node
+        elif not isinstance(node.get("models"), list):
+            # 只补 models 这一项。原来这里是把整个节点换成默认值，于是叠加层里
+            # `image: {strategy: weight_only}`（还没写 models）一旦被页面加进
+            # 第一个模型，用户自己指定的策略就被悄悄冲回 priority_then_weight。
+            node["models"] = []
         return node["models"]
 
     def _drop_tombstone(self, model_id: str) -> None:
@@ -363,19 +437,8 @@ class Overlay:
 
         # 自定义接口（generic_http）靠 options 描述请求形状，界面必须能填，
         # 否则选中「自定义接口」就是死路 —— 能选但永远跑不起来。
-        raw_options = payload.get("options")
-        if isinstance(raw_options, str):
-            text = raw_options.strip()
-            if text:
-                try:
-                    raw_options = json.loads(text)
-                except json.JSONDecodeError as exc:
-                    raise config.ConfigError(
-                        f"接口参数不是合法的 JSON：{exc.msg}（第 {exc.lineno} 行第 {exc.colno} 列）"
-                    ) from exc
-            else:
-                raw_options = None
-        if isinstance(raw_options, dict) and raw_options:
+        raw_options = coerce_options(payload.get("options"))
+        if raw_options:
             item["options"] = raw_options
 
         # 接口地址：与目录默认值相同的就不写，保持文件干净、也方便以后升级默认值
@@ -416,6 +479,7 @@ class Overlay:
             item["api_key_env"] = env
 
         # 写回列表：叠加层里原地更新（保持原有位置），手写层改成写一条覆盖条目
+        self._drop_vendor_tombstone(vendor_id)
         if existing is not None and layer == "overlay":
             existing.clear()
             existing.update(item)
@@ -451,7 +515,7 @@ class Overlay:
         located = self.locate_vendor(vendor_id)
         if located is None:
             raise config.ConfigError(f"找不到厂商：{vendor_id}")
-        existing, layer = located
+        existing, _layer = located
 
         dropped = set(self.models_of_vendor(vendor_id))
         # 级联删除引用它的模型 —— 否则那些模型会因为没有 provider 把整份配置弄坏，
@@ -469,19 +533,27 @@ class Overlay:
                 self._write_tombstone(kind, str(item.get("id")))
 
         # 只摘叠加层里的那条。手写层的厂商删不掉（不能改用户手写的文件），
-        # 但引用它的模型已经全部处理过了，配置仍然是自洽的。
+        # 靠下面那条墓碑把它盖住。
         for index, item in enumerate(self.vendors):
             if item is existing:
                 del self.vendors[index]
                 break
 
         label = str(existing.get("label") or vendor_id)
+        # 手写层里**也**有同 id 的条目吗（用户在页面上编辑过手写厂商，叠加层就会多
+        # 一条同 id 的覆盖条目，于是 locate_vendor 报 "overlay"）？原来这里只摘掉
+        # 覆盖条目就返回"已删除"，而合并时手写层那条又浮上来 —— 删完刷新，厂商还在，
+        # 而且没有任何提示。和模型一样写一条墓碑把它盖掉。
+        in_base = any(str(v.get("id")) == vendor_id for v in self.base_vendors())
+        if in_base:
+            self._write_vendor_tombstone(vendor_id)
+
         message = f"厂商「{label}」已删除"
-        if layer == "base":
+        if in_base:
             message = (
                 f"厂商「{label}」写在 config/models.yaml 里，页面不改动你手写的文件，"
-                f"所以它还会留在文件里（想彻底删掉请打开那个文件删掉这一段）。"
-                f"引用它的模型已经全部隐藏，配置仍然是可用的。"
+                f"所以在叠加层里把它盖掉了（想彻底删掉请打开那个文件删掉这一段；"
+                f"想恢复就在这里重新添加同 id 的厂商）。"
             )
         if dropped:
             message += (
@@ -490,7 +562,7 @@ class Overlay:
         return {
             "id": vendor_id,
             "removed_models": sorted(dropped),
-            "from_base": layer == "base",
+            "from_base": in_base,
             "message": message,
         }
 
@@ -541,8 +613,13 @@ class Overlay:
         supports_raw = payload.get("supports") or []
         if isinstance(supports_raw, str):
             supports = [s.strip() for s in supports_raw.split(",") if s.strip()]
-        else:
+        elif isinstance(supports_raw, (list, tuple)):
             supports = [str(s).strip() for s in supports_raw if str(s).strip()]
+        else:
+            raise config.ConfigError(
+                f"supports 必须是列表或逗号分隔的字符串，"
+                f"实际是 {type(supports_raw).__name__}"
+            )
         if not supports:
             supports = ["text2img"] if kind == "image" else ["text2video"]
 
@@ -650,7 +727,7 @@ class Overlay:
         found = self.locate_model(model_id)
         if found is None:
             raise config.ConfigError(f"找不到模型：{model_id}")
-        kind, item, layer = found
+        kind, item, _layer = found
         name = str(item.get("model") or model_id)
 
         # 叠加层里的条目直接摘掉
@@ -660,10 +737,18 @@ class Overlay:
                 m for m in node.get("models", []) if str(m.get("id")) != model_id
             ]
 
-        if layer == "base":
+        # 手写层里**也**有同 id 的条目吗？只看 locate_model 给的 layer 是不够的：
+        # 用户在页面上编辑过一条手写模型 → 叠加层多了一条同 id 的覆盖条目 →
+        # locate_model 报 "overlay"。原来这里就只摘覆盖条目、回一句"已删除"，
+        # 而合并时手写层那条又浮上来 —— 删掉、刷新、它还在，且没有任何提示。
+        base_hit = next(
+            (k for k, base_item in self.base_models() if str(base_item.get("id")) == model_id),
+            None,
+        )
+        if base_hit is not None:
             # 手写层里的条目不能真删 —— 那是用户自己的文件。写一条墓碑盖住它，
             # 对下游（路由、列表）的效果等同于删除，而且随时可以撤销。
-            self._write_tombstone(kind, model_id)
+            self._write_tombstone(base_hit, model_id)
             return {
                 "id": model_id,
                 "hidden": True,

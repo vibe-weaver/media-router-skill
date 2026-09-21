@@ -10,6 +10,22 @@ config/secrets*.local-backup*
 # 本地个人配置备份（开源清理时手工留的）
 config/*.local-backup*
 
+# 环境变量文件：密钥最常见的载体，一条也别放过
+.env
+.env.*
+
+# 手工备份 / 证书 / 私钥 / patch 残渣
+# 审计确认过仓库里目前没有这类文件，加在这里是防手滑：
+# 配置页面或手工调试留下的 models.web.yaml.bak-YYYYmmdd-HHMMSS 也在这条覆盖范围内。
+*.bak
+*.bak-*
+*.orig
+*.rej
+*.key
+*.pem
+*.p12
+*.pfx
+
 # 说明：config/models.web.yaml 是配置页面生成的厂商/模型清单，
 # 里面只有环境变量名、没有密钥，按设计是可以提交的。
 

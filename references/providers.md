@@ -11,7 +11,7 @@
 | `provider` | 平台 / 协议 | 图片 | 视频 | 需要密钥 |
 |---|---|---|---|---|
 | `native` | 内置工具（ImageGen / VideoGen 等） | ✓ | ✓ | 否 |
-| `openai` | OpenAI 及任何兼容 `/v1/images/*` 的网关 | ✓ | — | 是 |
+| `openai` | OpenAI 及任何兼容 `/v1/images/*`、异步 `/videos/generations` 的网关 | ✓ | ✓ | 是 |
 | `dashscope` | 阿里云百炼 · 通义万相 | ✓ | ✓ | 是 |
 | `volcengine` | 火山方舟 · 即梦 / Seedance | ✓ | ✓ | 是 |
 | `kling` | 可灵（快手） | ✓ | ✓ | 是（AK + SK） |
@@ -48,14 +48,22 @@
 
 ## openai — OpenAI 及兼容网关
 
-`/v1/images/generations`（文生图）与 `/v1/images/edits`（图生图，multipart 上传）。
+图像走 `/v1/images/generations`（文生图）与 `/v1/images/edits`（图生图，multipart 上传）。
 只要网关兼容这两个端点，改 `endpoint` 就能复用 —— SiliconFlow、Together、各类自建网关都算。
+
+视频走**异步任务**：`POST /videos/generations` 拿到任务 id，再轮询
+`GET /async-result/{id}`，从 `video_result[].url` 取产物。智谱（CogVideoX）就是这套协议，
+照抄它的网关同样适用。
 
 | 字段 | 说明 |
 |---|---|
 | `api_key_env` | 密钥环境变量名 |
-| `endpoint` | 默认 `https://api.openai.com/v1/images/generations`；图生图时自动把 `/generations` 换成 `/edits` |
-| `params` | 透传字段，如 `size`、`quality`、`style`、`background` |
+| `endpoint` | 图像默认 `https://api.openai.com/v1/images/generations`；图生图时自动把 `/generations` 换成 `/edits`。视频默认 `https://open.bigmodel.cn/api/paas/v4/videos/generations` |
+| `params` | 透传字段。图像如 `size`、`quality`、`style`、`background`；视频如 `size`、`quality`、`with_audio`、`fps`、`duration`、`watermark`、`seed` |
+| `options.task_base` | 只有视频用。查询地址默认从 `endpoint` 里切掉 `/videos/generations` 推出来；配了中转/网关又推不出来时，在这里显式写查询地址前缀 |
+
+命令行 `--duration` / `--size` / `--param key=value` 对视频都生效，
+优先级是 `--param` > 专用旗标 > `params`。
 
 ```yaml
 # OpenAI 官方
@@ -80,6 +88,18 @@
   endpoint: https://api.siliconflow.cn/v1/images/generations
   params:
     image_size: 1024x1024
+
+# 智谱 CogVideoX（同一套 provider，走视频的异步协议）
+- id: cogvideox-3
+  provider: openai
+  model: cogvideox-3
+  priority: 3
+  weight: 10
+  supports: [text2video, img2video]
+  api_key_env: MY_API_KEY
+  endpoint: https://open.bigmodel.cn/api/paas/v4/videos/generations
+  params:
+    quality: speed        # quality 更清晰、speed 更便宜
 ```
 
 **注意**：`gpt-image-1` 默认就返回 `b64_json` 且不接受 `response_format` 参数，

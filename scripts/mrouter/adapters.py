@@ -516,12 +516,153 @@ def gen_native(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) ->
 # ---------------------------------------------------------------- openai 兼容
 
 
+#: 智谱（CogView / CogVideoX）的 base。视频走异步任务：提交到
+#: ``{base}/videos/generations``，再用 ``{base}/async-result/{id}`` 查结果。
+#: 不少 OpenAI 兼容网关的视频接口照抄了这套协议，所以 provider=openai +
+#: kind: video 统一按它走。
+ZHIPU_BASE = "https://open.bigmodel.cn/api/paas/v4"
+OPENAI_VIDEO = f"{ZHIPU_BASE}/videos/generations"
+
+
+def _openai_video_target(spec: ModelSpec) -> tuple[str, str]:
+    """异步视频的 (提交地址, 任务查询前缀)。
+
+    查询地址必须跟着提交地址走：提交是 ``{base}/videos/generations``、查询是
+    ``{base}/async-result/{id}``，切掉最后一段就得到 base。给智谱配了中转/自建
+    网关时提交走网关、查询却直连 open.bigmodel.cn —— 要么被拦、要么悄悄绕过
+    网关，报错只剩一个连接超时，完全指不到原因。
+
+    推不出来时（endpoint 里没有 ``/videos/generations`` 这一段）**宁可退回官方
+    地址**，也不拼一个"看起来对、其实是错的"地址，后者只会得到更迷惑的 404。
+    这种情形用 ``options.task_base`` 显式指定。
+    """
+    endpoint = str(spec.endpoint or "").strip().rstrip("/") or OPENAI_VIDEO
+    explicit = str(spec.options.get("task_base") or "").strip()
+    if explicit:
+        return endpoint, explicit.rstrip("/")
+    head = endpoint.split("/videos/generations", 1)[0].rstrip("/")
+    if head and head != endpoint:
+        return endpoint, head
+    return endpoint, ZHIPU_BASE
+
+
+def _gen_openai_video(
+    spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
+) -> GenResult:
+    """OpenAI 风格的**异步**视频接口（智谱 CogVideoX，及照抄这套协议的网关）。
+
+    没有这个分支时，provider=openai 的视频模型会落进下面的图像逻辑：请求发去
+    /images/generations，拿回来的 VideoResult 里没有 ``data``，于是报一句
+    "响应中没有图片数据" —— 用户看到的是"我明明配了视频模型"，却查不到原因。
+    """
+    url, task_base = _openai_video_target(spec)
+    if spec.endpoint and task_base == ZHIPU_BASE and "/videos/generations" not in str(
+        spec.endpoint
+    ):
+        ctx.log(
+            "[openai] endpoint 是自定义地址但里面没有 /videos/generations 这一段，"
+            "推不出任务查询地址，已回退到智谱官方地址。如果这里配的是中转/网关，"
+            "请在模型的 options.task_base 里显式写上查询地址的前缀。"
+        )
+
+    headers = {"Authorization": f"Bearer {ctx.api_key}"}
+    body: dict[str, Any] = {"model": spec.model or spec.id, "prompt": req.prompt}
+    if req.negative_prompt:
+        body["negative_prompt"] = req.negative_prompt
+    if req.images:
+        body["image_url"] = _image_value(req.images[0])
+    body.update(spec.params)
+    body.update(
+        _param_map(
+            spec, req, ["size", "quality", "with_audio", "fps", "watermark", "seed"]
+        )
+    )
+    req_size = req.size or req.aspect_ratio
+    if req_size and "size" not in body:
+        body["size"] = req_size
+    # 时长必须**单独**取：CLI 的 --duration 落在 req.duration 上，而 _param_map
+    # 只认 spec.params / req.extra —— 光靠它会把 --duration 静默丢掉（与百炼
+    # 视频分支同一个形状的坑）。优先级：--param duration= > --duration > params。
+    duration = req.extra.get("duration")
+    if duration in (None, ""):
+        duration = req.duration
+    # 用真值判断而不是 `not in (None, "")`：0 既不等于 None 也不等于 ""，
+    # 那个写法会把 duration: 0 一路发出去。0 秒的视频没有意义，视为没指定。
+    if duration:
+        body["duration"] = duration
+
+    ctx.log(f"[openai] video submit -> {url}")
+    payload = (
+        request("POST", url, headers=headers, json_body=body, timeout=ctx.timeout).json()
+        or {}
+    )
+    if isinstance(payload, dict) and payload.get("error"):
+        # OpenAI 风格的 error 是 {"message": …}，直接 str 出来是一坨 dict，
+        # 用户得自己从花括号里找那句话。能取到 message 就只给 message。
+        raise HttpError(
+            f"provider 返回错误：{_dig(payload, 'error.message') or payload['error']}"
+        )
+
+    # 有的网关是同步返回的：提交就把产物给了，没有 task_id 可轮询。
+    task_id = _dig(payload, "id") or _dig(payload, "task_id") or _dig(payload, "output.task_id")
+    if not task_id:
+        found = _collect_urls_from_items(
+            _dig(payload, "video_result") or _dig(payload, "data")
+        )
+        if found:
+            return _finalize(spec, req, found, req.output_dir)
+        raise HttpError(
+            f"未拿到任务 id：{json.dumps(payload, ensure_ascii=False)[:300]}"
+        )
+
+    poll_url = f"{task_base}/async-result/{task_id}"
+
+    def probe() -> list[str] | None:
+        data = (
+            request("GET", poll_url, headers=headers, timeout=60).json() or {}
+        )
+        status = str(
+            data.get("task_status") or _dig(data, "output.task_status", "") or ""
+        ).upper()
+        if status in ("", "PROCESSING", "PENDING", "RUNNING", "QUEUING", "WAITING", "CREATED"):
+            return None
+        if status in ("FAILED", "FAILURE", "CANCELED", "CANCELLED", "ERROR"):
+            reason = (
+                _dig(data, "error.message")
+                or _dig(data, "message")
+                or _dig(data, "output.message")
+                or json.dumps(data, ensure_ascii=False)[:200]
+            )
+            raise HttpError(f"任务失败：{reason}")
+        found = _collect_urls_from_items(
+            data.get("video_result") or _dig(data, "data")
+        )
+        if not found:
+            single = (
+                _dig(data, "output.video_url")
+                or _dig(data, "video.url")
+                or _dig(data, "url")
+            )
+            if single:
+                found = [single]
+        if not found:
+            raise HttpError("任务成功但没解析出产物 URL")
+        return found
+
+    ctx.log(f"[openai] video task {task_id} 已提交，开始轮询")
+    urls = poll(probe, interval=ctx.poll_interval, max_seconds=ctx.max_poll)
+    return _finalize(spec, req, urls, req.output_dir, extra_meta={"task_id": task_id})
+
+
 def gen_openai(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> GenResult:
-    """OpenAI 风格图像接口（/v1/images/generations 与 /v1/images/edits）。
+    """OpenAI 风格接口：图像走 ``/v1/images/generations`` 与 ``/v1/images/edits``，
+    视频走异步任务（见 ``_gen_openai_video``）。
 
     SiliconFlow、Together、以及大多数自建网关都兼容这套协议，
     只要在配置里改 endpoint 就能复用。
     """
+    if req.kind == "video":
+        return _gen_openai_video(spec, req, cfg, ctx)
     headers = {"Authorization": f"Bearer {ctx.api_key}"}
     # 有输入图就走 /edits（改图）。原来的写法是
     # `bool(req.images) and ("img2img" in req.requires or … or bool(req.images))` ——
@@ -654,11 +795,32 @@ def _dashscope_task_base(spec: ModelSpec) -> tuple[str, bool]:
     return DASHSCOPE_BASE, False
 
 
+def _dashscope_qwen_url(spec: ModelSpec) -> str:
+    """qwen-image 的提交地址。
+
+    厂商的 ``endpoints.image`` 只能写一个，写的是 wanx 的异步接口（目录默认值就是它），
+    而 qwen-image 走的是多模态同步接口。配置加载时会按 catalog 把厂商省略的地址补回
+    ``spec.endpoint``，于是这里拿到的往往是 text2image 那个 —— 直接用会得到
+    400 "url error"。
+
+    所以按 ``/services/`` 之前的 base 重拼多模态路径，中转网关的路径前缀原样保留。
+    ``endpoint`` 里没有 ``/services/`` 这一段时，说明用户指的就是多模态地址本身
+    （或另一套网关），原样用，不做猜测。
+    """
+    endpoint = str(spec.endpoint or "").strip()
+    if not endpoint:
+        return DASHSCOPE_QWEN_IMAGE
+    head = endpoint.split("/services/", 1)[0].rstrip("/")
+    if not head or head == endpoint.rstrip("/"):
+        return endpoint
+    return f"{head}/services/aigc/multimodal-generation/generation"
+
+
 def _gen_dashscope_qwen_image(
     spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
 ) -> GenResult:
     """qwen-image：同步多模态接口（messages 进、choices[].message.content[].image 出）。"""
-    url = spec.endpoint or DASHSCOPE_QWEN_IMAGE
+    url = _dashscope_qwen_url(spec)
     content: list[dict[str, Any]] = []
     if req.prompt:
         content.append({"text": req.prompt})
@@ -743,7 +905,7 @@ def _gen_dashscope_wanx(
             inputs["img_url"] = req.images[0]
         parameters: dict[str, Any] = {}
         parameters.update(spec.params)
-        parameters.update(_param_map(spec, req, ["size", "resolution", "prompt_extend"]))
+        parameters.update(_param_map(spec, req, ["size", "resolution", "prompt_extend", "watermark"]))
         # 时长必须**单独**取：CLI 的 --duration 落在 req.duration 上，而 _param_map
         # 只认 spec.params / req.extra —— 光靠它会把 --duration 静默丢掉（火山分支
         # 用 `req.duration or spec.params.get("duration")` 兜住了，这段漏了），
@@ -931,6 +1093,25 @@ def gen_volcengine(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
 KLING_BASE = "https://api-beijing.klingai.com/v1"
 
 
+def _kling_video_url(spec: ModelSpec, mode: str) -> str:
+    """可灵视频的提交地址（``mode`` 为 ``text2video`` 或 ``image2video``）。
+
+    可灵按模式分两个端点，而厂商的 ``endpoints.video`` 只能存一个（目录默认值是
+    ``videos/text2video``）。配置加载会把厂商省略的地址按 catalog 补回 ``spec.endpoint``，
+    于是带参考图的请求会打到文生视频接口上 —— 反过来也一样。
+
+    只在末段**正好是另一个模式**时替换，别的路径（自建网关等）原样保留，
+    不去猜用户没写的东西。
+    """
+    endpoint = str(spec.endpoint or "").strip().rstrip("/")
+    if not endpoint:
+        return f"{KLING_BASE}/videos/{mode}"
+    other = "text2video" if mode == "image2video" else "image2video"
+    if endpoint.endswith(f"/videos/{other}"):
+        return f"{endpoint[: -len(other)]}{mode}"
+    return endpoint
+
+
 def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
@@ -984,7 +1165,7 @@ def gen_kling(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> 
 
     if req.kind == "video":
         mode = "image2video" if req.images else "text2video"
-        url = spec.endpoint or f"{KLING_BASE}/videos/{mode}"
+        url = _kling_video_url(spec, mode)
         body: dict[str, Any] = {"model_name": spec.model or spec.id}
         if req.prompt:
             body["prompt"] = req.prompt

@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import catalog
+
 # mrouter/config.py -> mrouter -> scripts -> <skill_dir>
 SKILL_DIR = Path(__file__).resolve().parents[2]
 
@@ -68,6 +70,12 @@ def _load_structured(path: Path) -> Any:
     """
     suffix = path.suffix.lower()
     text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        # 空文件 = "什么都没配"，不是解析错误。三条路原来的答案各不相同：
+        # json.loads("") 抛异常、PyYAML 给 None、miniyaml 给 {} ——
+        # 前两种都会让上层报"配置文件顶层必须是映射"，于是"新建一个空的
+        # models.web.yaml"在装了 PyYAML 的机器上直接把配置页面和 CLI 一起弄挂。
+        return {}
     if suffix == ".json":
         try:
             return json.loads(text)
@@ -82,7 +90,7 @@ def _load_structured(path: Path) -> Any:
 
         parser = miniyaml.loads
     try:
-        return parser(text)
+        parsed = parser(text)
     except Exception as exc:  # noqa: BLE001 - 任何解析错误都要变成可读提示
         hints = lint_text(text)
         detail = "\n".join(f"    - {h}" for h in hints)
@@ -90,6 +98,8 @@ def _load_structured(path: Path) -> Any:
             f"{path.name} 解析失败：{exc}"
             + (f"\n  顺带发现这些问题：\n{detail}" if detail else "")
         ) from exc
+    # 只有注释的 YAML：PyYAML 给 None，miniyaml 给 {}。统一成 {}，理由同上。
+    return {} if parsed is None else parsed
 
 
 @dataclass
@@ -235,11 +245,23 @@ class RouterConfig:
         return sorted(self.pools)
 
     def find_model(self, model_id: str) -> ModelSpec:
+        """按 id 取**已配置**的模型。
+
+        只认配置里有的 id 是刻意的：路由本来就只从配置的池子里挑，这里是所有
+        "指定某个模型"的入口（`generate --model`、`report --model`）共用的唯一
+        关卡。调用方 —— 尤其是替用户干活的 AI 助手 —— 不许凭平台文档、模型列表
+        或目录里的候选现编一个名字直接调，那等于绕开用户的选择去花他的钱。
+        要新模型就让用户在 models.yaml 或配置页面里加，加完这里自然找得到。
+        """
         for pool in self.pools.values():
             for spec in pool.models:
                 if spec.id == model_id:
                     return spec
-        raise ConfigError(f"找不到模型 id：{model_id}")
+        raise ConfigError(
+            f"找不到模型 id：{model_id}。只能调用配置里已有的模型"  # 策略，不是笔误
+            f"（用 list 子命令看看有哪些）；要新增请先在 config/models.yaml"
+            f" 或配置页面里添加。"
+        )
 
     def _health_cfg(self) -> tuple[int, float]:
         hcfg = self.defaults.get("health") or {}
@@ -378,8 +400,15 @@ def _coerce_spec(
     supports_raw = entry.get("supports") or []
     if isinstance(supports_raw, str):
         supports = [s.strip() for s in supports_raw.split(",") if s.strip()]
-    else:
+    elif isinstance(supports_raw, (list, tuple)):
         supports = [str(s).strip() for s in supports_raw if str(s).strip()]
+    else:
+        # `supports: 5` 这种写法原来会一路走到 `for s in supports_raw` 抛 TypeError，
+        # 被 CLI 归成 kind=internal。与 params / options 的形状校验保持一致。
+        raise ConfigError(
+            f"模型 {model_id} 的 supports 必须是列表或逗号分隔的字符串，"
+            f"实际是 {type(supports_raw).__name__}"
+        )
 
     reserved = {
         "id",
@@ -444,6 +473,12 @@ def _coerce_vendors(raw: Any, warnings: list[str]) -> dict[str, Vendor]:
     for index, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise ConfigError(f"vendors[{index}] 必须是映射")
+        if is_tombstone(entry):
+            # 厂商墓碑：配置页面删掉一条写在 models.yaml 里的厂商时留下的标记，
+            # 用来盖住手写层那条。_merge_config 走 _dedupe_last 时会丢掉它，但直接
+            # 调 build_vendors 的地方（webserver 拼两层测真实生成）会拿到原始列表 ——
+            # 墓碑没有 provider，不跳过就会报"缺少必填字段 provider"。
+            continue
         vendor_id = str(entry.get("id") or "").strip()
         if not vendor_id:
             raise ConfigError(f"vendors[{index}] 缺少必填字段 id")
@@ -451,12 +486,25 @@ def _coerce_vendors(raw: Any, warnings: list[str]) -> dict[str, Vendor]:
         if not provider:
             raise ConfigError(f"厂商 {vendor_id} 缺少必填字段 provider")
 
+        catalog_key = str(entry.get("catalog") or "").strip()
         endpoints_raw = entry.get("endpoints") or {}
         endpoints = (
             {str(k): str(v) for k, v in endpoints_raw.items() if v}
             if isinstance(endpoints_raw, dict)
             else {}
         )
+        # 保存端刻意省略"与目录默认值相同"的地址（见 store.upsert_vendor），
+        # 所以缺的必须在这里按 catalog 补回来。少了这一步 endpoint 就是空串，
+        # 适配器会回落到 provider 自己的内置默认地址 —— 而智谱、硅基流动的
+        # provider 都是 openai，请求于是被静默发到 api.openai.com：
+        # 用户配的是 A 厂商，打到的是 B 厂商，而且"测试连通性"还是绿的
+        # （probe / webserver 各自都有目录兜底，只有生成这条路没有）。
+        # 文件里写了的地址优先（中转 / 自建网关），这里只补缺的。
+        catalog_entry = catalog.get(catalog_key)
+        if catalog_entry is not None:
+            for pool_kind, url in (catalog_entry.endpoints or {}).items():
+                if url:
+                    endpoints.setdefault(str(pool_kind), str(url))
         options_raw = entry.get("options")
         if options_raw is not None and not isinstance(options_raw, dict):
             raise ConfigError(
@@ -473,7 +521,7 @@ def _coerce_vendors(raw: Any, warnings: list[str]) -> dict[str, Vendor]:
             provider=provider,
             label=str(entry.get("label") or entry.get("name") or "").strip(),
             api_key_env=str(entry.get("api_key_env") or "").strip(),
-            catalog=str(entry.get("catalog") or "").strip(),
+            catalog=catalog_key,
             endpoints=endpoints,
             options=dict(options_raw or {}),
             note=str(entry.get("note") or "").strip(),
@@ -849,6 +897,15 @@ def load_raw(allow_missing: bool = False) -> tuple[dict[str, Any], list[Path], P
         layer = _load_structured(path)
         if not isinstance(layer, dict):
             raise ConfigError(f"配置文件顶层必须是映射：{path}")
+        raw_defaults = layer.get("defaults")
+        if raw_defaults is not None and not isinstance(raw_defaults, dict):
+            # 不拦在这里的话，_merge_config 的 `.items()` 会抛 AttributeError、
+            # load_config 的 `dict(...)` 会抛 TypeError —— 都不是 ConfigError，
+            # CLI 归成 kind=internal，用户只看到"内部错误"，想不到是自己写错了形状。
+            raise ConfigError(
+                f"{path.name} 的顶层 defaults 必须是映射（key: value），"
+                f"实际是 {type(raw_defaults).__name__}"
+            )
         data = _merge_config(data, layer)
     return data, paths, overlay_path
 
