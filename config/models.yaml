@@ -42,7 +42,7 @@ defaults:
   max_poll_seconds: 900
   # 单次 generate 最多尝试几个候选模型（失败后自动换下一个）
   max_attempts: 2
-  # 产物落盘目录。null = <skill>/outputs
+  # 产物落盘目录。null = ./outputs（运行命令时的当前工作目录）
   output_dir: null
   # 熔断状态目录。null = <skill>/state
   state_dir: null
@@ -64,11 +64,20 @@ defaults:
     prompt: "用一两句中文客观描述这张图片：主体内容、风格、构图与配色。"
 
 # ---------------------------------------------------------------------------
-# 图片模型池 —— 初始为空，往 models: 下面加条目即可
+# 图片模型池 —— 默认只有一条内置工具兜底，往 models: 下面加自己的条目即可
 # ---------------------------------------------------------------------------
 image:
   strategy: priority_then_weight
-  models: []
+  models:
+    # 内置工具兜底：不调任何接口，把请求交回给 AI 助手，让它用自己的 ImageGen 完成。
+    # priority 给一个最大的数，保证它永远排在真模型后面；没配 Key 时靠它兜底，
+    # 任务不会直接失败（返回 status: delegate，退出码 3）。自己加的模型会自动排在它前面。
+    - id: builtin-imagen
+      provider: native
+      priority: 9
+      weight: 100
+      enabled: true
+      supports: [text2img, img2img]
 # 示例（完整写法见 references/providers.md）：
 # image:
 #   strategy: priority_then_weight
@@ -86,11 +95,18 @@ image:
 #       #   size: 1024x1024
 
 # ---------------------------------------------------------------------------
-# 视频模型池 —— 初始为空
+# 视频模型池 —— 默认只有一条内置工具兜底，同样往 models: 下面加自己的条目
 # ---------------------------------------------------------------------------
 video:
   strategy: priority_then_weight
-  models: []
+  models:
+    # 同图片池的内置工具兜底，委托给 agent 的 VideoGen。
+    - id: builtin-video
+      provider: native
+      priority: 9
+      weight: 100
+      enabled: true
+      supports: [text2video, img2video]
 # 示例：
 # video:
 #   strategy: priority_then_weight

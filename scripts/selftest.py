@@ -2133,6 +2133,64 @@ def check_bugfixes_round2(check) -> None:
         _forced,
     )
 
+    # ------------------------------------------------ C2：出厂配置自带的 native 兜底
+    # README 和 SKILL.md 都承诺「没配任何 Key 也能跑」：默认的 models.yaml 里每个类目
+    # 都该有一条 native 兜底条目，路由挑不出真模型时由它把请求交回内置工具。
+    # 这条承诺曾经不成立 —— 两个池都是空的，新装用户 `resolve --kind image` 直接
+    # 报「类目 image 下没有任何可用（enabled）模型」，和文档描述对不上。
+    # 这里同时钉住"文件里有"和"真能路由出来"两件事：只查文件的话，条目写对了但
+    # supports/enabled 配错（照样挑不中）查不出来。
+    _shipped_cfg = config.CONFIG_DIR / "models.yaml"
+    _shipped_data = _load(_shipped_cfg.read_text(encoding="utf-8")) if _shipped_cfg.exists() else {}
+    _no_fallback: list[str] = []
+    if isinstance(_shipped_data, dict):
+        for _kind, _pool in _shipped_data.items():
+            if not isinstance(_pool, dict) or not isinstance(_pool.get("models"), list):
+                continue
+            if not any(
+                isinstance(_m, dict)
+                and str(_m.get("provider")) == "native"
+                and not config.is_tombstone(_m)
+                for _m in _pool["models"]
+            ):
+                _no_fallback.append(str(_kind))
+    check(
+        "出厂配置的每个模型池都有 native 兜底条目",
+        bool(_shipped_data) and not _no_fallback,
+        f"缺兜底的类目：{_no_fallback}" if _no_fallback else "读不到出厂 models.yaml",
+    )
+
+    # 行为层面：拿**出厂**配置（而不是自检的临时配置）真跑一次路由，每个类目都必须
+    # 挑得出候选。MEDIA_ROUTER_CONFIG 此刻指向临时配置，这里临时换过去再换回来。
+    _saved_config_env = os.environ.get("MEDIA_ROUTER_CONFIG")
+    os.environ["MEDIA_ROUTER_CONFIG"] = str(_shipped_cfg)
+    try:
+        _shipped_cfg_obj = config.load_config()
+        _providers_by_kind: dict[str, Any] = {}
+        for _kind in ("image", "video"):
+            try:
+                _ordered, _ = cli._resolve(  # noqa: SLF001
+                    _shipped_cfg_obj,
+                    health.HealthStore(_shipped_cfg_obj.health_path),
+                    _types.SimpleNamespace(kind=_kind, model=None, image=[], supports=None),
+                )
+                _providers_by_kind[_kind] = [str(m.provider) for m in _ordered]
+            except Exception as exc:  # noqa: BLE001
+                _providers_by_kind[_kind] = f"{type(exc).__name__}: {exc}"
+    finally:
+        if _saved_config_env is None:
+            os.environ.pop("MEDIA_ROUTER_CONFIG", None)
+        else:
+            os.environ["MEDIA_ROUTER_CONFIG"] = _saved_config_env
+    check(
+        "出厂配置下每个类目都能路由出候选（兜底条目真的生效）",
+        all(
+            isinstance(_v, list) and "native" in _v
+            for _v in _providers_by_kind.values()
+        ),
+        str(_providers_by_kind),
+    )
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

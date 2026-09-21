@@ -70,7 +70,7 @@
 | **多模型池** | 优先级分档 + 同档加权随机 | 想让 A 永远优先就分开档位；想 5:3 分摊流量就同档设 50:30 |
 | **自动降级** | 失败即换下一个候选 | 缺密钥的模型会被跳过，**且不占用重试次数** |
 | **自动熔断** | 连续失败进入冷却 | 冷却期内不再被选中，成功后计数清零；状态落在 `state/health.json` |
-| **永不卡死** | `native` 兜底条目 | 没配任何 Key 也能返回「请调用内置 ImageGen」的委托指令 |
+| **永不卡死** | 出厂自带 `native` 兜底 | 图片 / 视频池各带一条 `builtin-imagen` / `builtin-video`（priority 9），真模型都不可用时返回「请调用内置 ImageGen」的委托指令 |
 | **零依赖** | 纯标准库 | 没装 PyYAML 就用内置 `miniyaml`，两条解析路径**逐字节比对**过 |
 | **网页配置** | 本地单文件配置台 | 配厂商/模型、滑块调权重、一键验密钥，不用手写 YAML |
 | **结果回传** | 元数据 / 视觉描述 | 让看不见图的文本模型拿到一句真实画面描述，接着往下推理 |
@@ -94,7 +94,10 @@
 | 智谱 BigModel（CogView / CogVideoX） | `openai` | ✓ | ✓ | `MY_API_KEY` |
 
 另有两条特殊条目：**内置工具兜底**（`native`，无需密钥）和**自定义接口**（`generic_http`，高级）。
-各平台的完整接入参数见 [`references/providers.md`](references/providers.md)。
+
+出厂配置的图片池和视频池里各带一条 `native` 兜底（`builtin-imagen` / `builtin-video`），priority 填的是
+最大值，所以你加的第三方模型永远排在它们前面；只有真模型全都不可用时才轮到它们 —— 这就是
+「没配任何 Key 也能跑」的由来。各平台的完整接入参数见 [`references/providers.md`](references/providers.md)。
 
 ---
 
@@ -127,7 +130,11 @@ python3 scripts/media_router.py web
 **① 厂商配置** — 点「添加厂商」，从内置平台里挑一个，把 API Key 粘进去，保存。
 
 **② 模型配置** — 点「添加模型」，下拉选刚配好的厂商 → 填模型名称（以厂商控制台里显示的为准）
-→ 打上「图像 / 视频」标签 → **点「测试连通性」**（或「真实测试」）→ 调权重滑块 → 保存。
+→ 打上「图像 / 视频」标签 → （可选）填**生成规格**：图像是尺寸，视频是清晰度 + 时长，不填就用
+平台默认 → **点「测试连通性」**（或「真实测试」）→ 调权重滑块 → 保存。
+
+那格生成规格会写进这个模型的 `params`，也就是它每次生成时的固定参数（相当于命令行里少写
+`--size` / `--duration`）。图像选尺寸、视频选清晰度和时长是两套不同的预设，页面上按模型类型自动切换。
 
 两个测试按钮的区别：
 
@@ -172,6 +179,11 @@ python3 scripts/media_router.py web
 而且随时可以重新添加同 id 的模型恢复。所以按钮上写的是「隐藏」而不是「删除」，确认框里也会说明。
 想彻底删掉请直接编辑 `models.yaml`。
 
+**厂商也一样。** 删掉一条手写在 `models.yaml` 里的厂商，页面同样只能写一条厂商墓碑把它盖住，
+并提示你「已删除，但文件里那段还在」—— 想彻底删掉得自己去改 `models.yaml`。
+删除厂商时会连带把它名下的模型一并隐藏（否则配置会引用一个不存在的厂商而加载失败），
+被连带隐藏的手写模型同样写的是墓碑，不是真删。
+
 同理，编辑手写层里的模型时，厂商下拉框会多一个「（保持原样，不改厂商）」选项：那种模型用的是内联
 `provider`，不挂在任何厂商下，页面只能改它的名称、优先级、权重和能力标签；接口地址和密钥要去
 `models.yaml` 改。
@@ -194,7 +206,7 @@ cd <skill目录>
 # 忘了有什么命令？光敲脚本名就会列出全部用法
 python3 scripts/media_router.py
 
-# 1. 看模型池状态（此时应该有两三个模型显示 api_key_ready: false）
+# 1. 看模型池状态（出厂每个池只有一条内置兜底 builtin-imagen / builtin-video）
 python3 scripts/media_router.py list --pretty
 
 # 2. 配一个 Key（以火山方舟为例）
@@ -212,9 +224,11 @@ python3 scripts/media_router.py generate --kind image --prompt "一只戴圆框�
 **忘了命令？** 光敲 `python3 scripts/media_router.py`（不带任何子命令）会列出全部子命令和常用示例；
 具体的参数用 `... <子命令> --help`。
 
-**没配任何 Key 也能跑。** 配置里默认带了一个 `provider: native` 的兜底条目，它不会真出图，
-而是返回「请调用 ImageGen」的指令（`status: delegate`，退出码 3），交给 agent 用它自己的内置工具完成。
-这样在没配 Key 时任务也不会彻底卡死。
+**没配任何 Key 也能跑。** 出厂配置的图片池和视频池里各带了一条 `provider: native` 的兜底条目
+（`builtin-imagen` / `builtin-video`，priority 9），它们不会真出图，而是返回「请调用 ImageGen /
+VideoGen」的指令（`status: delegate`，退出码 3），交给 agent 用它自己的内置工具完成。
+priority 是最大的，所以你自己加的第三方模型永远排在它们前面；真模型全都不可用时才轮到它们，
+这样在没配 Key 或 Key 全挂了时任务也不会彻底卡死。
 
 #### 全部子命令
 
@@ -239,7 +253,7 @@ python3 scripts/selftest_web.py  # 网页配置全链路
 ```
 
 两个脚本**都不需要任何 API Key**，全绿就说明这套代码在你的环境里可用
-（Windows 中文环境、Python 3.13 实测：`164/164`、`231/231`）。
+（Windows 中文环境、Python 3.13 实测：`166/166`、`231/231`）。
 
 `selftest.py` 会在本地起一个模拟的异步任务接口，把「提交 → 轮询 → 下载 → 落盘 → 读元数据 → 失败降级」
 整条链路真跑一遍。
@@ -276,6 +290,8 @@ image:
 
 优先级 1 的模型**永远**压过优先级 2 —— 只要有档位 1 的模型健康可用，就轮不到档位 2。
 只有在同一个 priority 内，才按 weight 加权随机。
+
+下表是一份**示例**配置的实测结果（出厂配置里只有 `builtin-imagen` 一条，你加进第三方模型后它自然让位）：
 
 | 模型 | priority | weight | 实际首选概率 |
 |---|---|---|---|
@@ -447,7 +463,7 @@ media-router/
 │       ├── cli.py            # 命令行
 │       └── miniyaml.py       # YAML 子集解析与序列化（没装 pyyaml 时的回退）
 ├── state/health.json         # 运行时熔断状态（首次运行时自动生成）
-├── outputs/                  # 产物默认落盘位置（首次运行时自动生成）
+├── outputs/                  # 产物默认落盘位置：运行命令时的当前工作目录下（不一定是这里）
 └── references/providers.md   # 各平台接入参数对照
 ```
 
@@ -494,9 +510,11 @@ media-router/
 
 **Q：产物存在哪？**
 
-默认 `<skill>/outputs/`，文件名形如 `image_jimeng-seedream_20260916_221630412_01.png`
-（毫秒级时间戳 + 序号，不会互相覆盖）。用 `--output-dir` 可改写；在 `models.yaml` 的
-`defaults.output_dir` 改默认值。
+默认**运行命令时的当前工作目录**下的 `./outputs/`（不是 skill 目录 —— 很多 agent 沙箱把 skill
+目录设成只读，落在 cwd 你才拿得到），文件名形如 `image_jimeng-seedream_20260916_221630412_01.png`
+（毫秒级时间戳 + 序号，不会互相覆盖）。改目录的优先级：`--output-dir`（本次命令）
+> `models.yaml` 的 `defaults.output_dir`（默认值，出厂是 `null`）> `MEDIA_ROUTER_OUTPUT_DIR`
+> 环境变量 > 当前工作目录 `./outputs`。
 
 **Q：能不能不让 agent 自己动我的配置？**
 
