@@ -424,7 +424,12 @@ class ConfigApi:
             api_key=str(body.get("api_key") or ""),
             api_key_env=str(body.get("api_key_env") or ""),
             endpoints=endpoints,
-            options=dict(body.get("options") or {}),
+            # 页面的"接口参数"是文本框，送过来的是原始 JSON 字符串。
+            # 这里原来写 dict(body.get("options") or {})，对字符串会抛
+            # "dictionary update sequence element #0 has length 1; 2 is required"，
+            # 于是同一个表单"保存"能成、"测试连通性"直接 400 —— 用户完全看不出
+            # 两处差在哪。与保存路径共用同一套解析（store.coerce_options）。
+            options=store.coerce_options(body.get("options")),
             vendor_id=str(body.get("vendor_id") or body.get("id") or ""),
         )
 
@@ -711,13 +716,27 @@ def _make_handler(app: ConfigServer) -> type[BaseHTTPRequestHandler]:
             )
 
         def _origin_ok(self) -> bool:
-            """有 Origin 就必须同源。没有 Origin 说明是 curl / 原生请求，放过。"""
+            """有 Origin 就必须是同源的**回环**来源。没有 Origin 说明是 curl /
+            原生请求，放过。
+
+            不能拿 Origin 和 app.origin 逐字比较：页面从 http://localhost:PORT
+            打开时，浏览器发的 Origin 就是 localhost，而 app.origin 用的是绑定
+            地址（默认 127.0.0.1），逐字比永远不等 —— GET 能过、每个 POST 都回
+            403「请求来源不是本页面」，用户只会以为"页面坏了"。
+
+            服务自身只监听回环地址（见 ConfigServer.__init__ 的 _is_loopback
+            校验），所以"来源也是回环 + 端口一致"与逐字比较的安全性完全相同。
+            """
             for header in ("Origin", "Referer"):
                 value = self.headers.get(header)
                 if not value:
                     continue
                 parsed = urlparse(value)
-                if f"{parsed.scheme}://{parsed.netloc}" != app.origin:
+                if parsed.scheme != "http":
+                    return False
+                if not _is_loopback((parsed.hostname or "").lower()):
+                    return False
+                if (parsed.port or 80) != app.port:
                     return False
             return True
 

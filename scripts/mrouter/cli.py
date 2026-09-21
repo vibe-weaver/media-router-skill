@@ -606,7 +606,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--kind", required=True, choices=["image", "video"], help="要生成哪类媒体")
         p.add_argument("--supports", help="能力过滤，逗号分隔，如 text2img,img2img")
         p.add_argument("--image", action="append", help="输入图片（本地路径或 URL），可重复")
-        p.add_argument("--model", help="强制指定模型 id，跳过路由")
+        p.add_argument(
+            "--model",
+            help="强制指定模型 id，跳过路由（只能是配置里已有的 id，见 list）",
+        )
 
     p_resolve = sub.add_parser("resolve", parents=[common], help="只看会选谁，不真调用")
     add_routing_flags(p_resolve)

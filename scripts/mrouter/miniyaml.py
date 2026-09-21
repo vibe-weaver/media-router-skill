@@ -313,6 +313,11 @@ def _reject_nested_colon(rest: str) -> None:
         )
 
 
+def _is_seq_item(content: str) -> bool:
+    """这一行是不是块序列项（``- `` 开头，或整行就一个 ``-``）。"""
+    return content == "-" or content.startswith("- ")
+
+
 def _parse_map(tokens: list[tuple[int, str]], pos: int, indent: int) -> tuple[dict[str, Any], int]:
     result: dict[str, Any] = {}
     while pos < len(tokens):
@@ -321,7 +326,7 @@ def _parse_map(tokens: list[tuple[int, str]], pos: int, indent: int) -> tuple[di
             break
         if cur_indent > indent:
             raise MiniYamlError(f"缩进异常：{content!r} 比同级多缩进了 {cur_indent - indent} 个空格")
-        if content.startswith("- ") or content == "-":
+        if _is_seq_item(content):
             break
         key, has_sep, rest = _split_key(content)
         if not has_sep:
@@ -331,8 +336,20 @@ def _parse_map(tokens: list[tuple[int, str]], pos: int, indent: int) -> tuple[di
                 f"文本里带冒号的写法要加引号，例如 aspect_ratio: \"1:1\"）"
             )
         if rest == "":
-            if pos + 1 < len(tokens) and tokens[pos + 1][0] > cur_indent:
-                child, pos = _parse_block(tokens, pos + 1, tokens[pos + 1][0])
+            nxt = tokens[pos + 1] if pos + 1 < len(tokens) else None
+            if nxt is not None and nxt[0] > cur_indent:
+                child, pos = _parse_block(tokens, pos + 1, nxt[0])
+                result[key] = child
+            elif nxt is not None and nxt[0] == cur_indent and _is_seq_item(nxt[1]):
+                # YAML 允许块序列与父键同缩进（compact notation）：
+                #     image:
+                #       models:
+                #       - id: m1
+                # 原来这里只认"更深缩进"，于是同缩进的序列被判成"值为空"，
+                # 序列项被当成兄弟行留给上层：顶层的会**静默丢掉**（连同它之后的
+                # 所有键），嵌套的会抛"缩进异常"。而 PyYAML 两种写法都认 ——
+                # 同一份手写配置在装没装 PyYAML 的机器上行为分叉，这是最坑的一种。
+                child, pos = _parse_seq(tokens, pos + 1, cur_indent)
                 result[key] = child
             else:
                 result[key] = None
@@ -350,7 +367,7 @@ def _parse_seq(tokens: list[tuple[int, str]], pos: int, indent: int) -> tuple[li
         cur_indent, content = tokens[pos]
         if cur_indent < indent:
             break
-        if not (content.startswith("- ") or content == "-"):
+        if not _is_seq_item(content):
             break
         body = content[2:].strip() if content.startswith("- ") else ""
         if body == "":
@@ -374,6 +391,20 @@ def _parse_seq(tokens: list[tuple[int, str]], pos: int, indent: int) -> tuple[li
             items.append(item)
             pos = scan
             continue
+        if _is_seq_item(body):
+            # 嵌套序列（`- - x`）。原来会走到下面的 _scalar，把 "- x" 当成一个
+            # 字符串标量、再把后续的 `- y` 当成兄弟项 —— PyYAML 给的是 [['x','y']]，
+            # 于是同一份文件两种解析器给出不同结构，而且都不报错。
+            pseudo = cur_indent + 2
+            block = [(pseudo, body)]
+            scan = pos + 1
+            while scan < len(tokens) and tokens[scan][0] > cur_indent:
+                block.append(tokens[scan])
+                scan += 1
+            item, _ = _parse_seq(block, 0, pseudo)
+            items.append(item)
+            pos = scan
+            continue
         items.append(_scalar(body))
         pos += 1
     return items, pos
@@ -383,7 +414,7 @@ def _parse_block(tokens: list[tuple[int, str]], pos: int, indent: int) -> tuple[
     if pos >= len(tokens):
         return None, pos
     first = tokens[pos][1]
-    if first.startswith("- ") or first == "-":
+    if _is_seq_item(first):
         return _parse_seq(tokens, pos, indent)
     # 整份文档就是一个裸标量（`loads("1024x1024")`）。这也要能解析 ——
     # PyYAML 支持，回退解析器不支持的话，行为又分叉了。

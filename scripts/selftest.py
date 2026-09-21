@@ -385,6 +385,9 @@ def main() -> int:
     print("\n[selftest] 已修 bug 的回归断言")
     check_bugfixes(check)
 
+    print("\n[selftest] 已修 bug 的回归断言（第二轮）")
+    check_bugfixes_round2(check)
+
     passed = sum(1 for _, ok, _ in results if ok)
     for name, ok, detail in results:
         mark = "PASS" if ok else "FAIL"
@@ -716,6 +719,7 @@ def check_bugfixes(check) -> None:
     import base64  # noqa: PLC0415
     import dataclasses  # noqa: PLC0415
     import shutil  # noqa: PLC0415
+    from typing import Any  # noqa: PLC0415
 
     from mrouter import adapters, catalog, config, miniyaml, probe, transport  # noqa: PLC0415
 
@@ -770,6 +774,191 @@ def check_bugfixes(check) -> None:
     except Exception as exc:  # noqa: BLE001
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     check("厂商 options 写成列表时报配置错误", ok, detail)
+
+    # ------------------------------------------- 厂商端点的目录兜底（本轮新发现）
+    # store.upsert_vendor 保存时会省略"与目录默认值相同"的 endpoints（注释说
+    # 是为了保持文件干净、方便以后升级默认值），但加载端过去从不按 catalog 把它
+    # 补回来 —— 于是 spec.endpoint 是空串，适配器回落到 provider 自己的内置默认
+    # 地址。智谱、硅基流动的 provider 都是 openai，请求就被发到 api.openai.com：
+    # 用户配的是 A 厂商、打到的是 B 厂商。更隐蔽的是"测试连通性"仍然是绿的，
+    # 因为 probe.py 和 webserver.py 各自都写了目录兜底，只有生成这条路没有。
+    _zp = catalog.get("zhipu")
+    _sf = catalog.get("siliconflow")
+    _vend = config.build_vendors(
+        [
+            {"id": "v-zhipu", "provider": "openai", "catalog": "zhipu"},
+            {"id": "v-sf", "provider": "openai", "catalog": "siliconflow"},
+            {
+                "id": "v-gw",
+                "provider": "openai",
+                "catalog": "zhipu",
+                "endpoints": {"video": "https://gw.example.com/v4/videos/generations"},
+            },
+            {"id": "v-hand", "provider": "openai"},
+        ]
+    )
+
+    def _ep(kind: str, vendor_id: str) -> str:
+        return config.build_spec_from_entry(
+            kind, {"id": "m", "model": "m", "vendor": vendor_id}, _vend
+        ).endpoint
+
+    check(
+        "厂商省略 endpoints 时按目录补齐（智谱视频不再回落到 api.openai.com）",
+        _ep("video", "v-zhipu") == _zp.endpoints["video"],
+        f"endpoint={_ep('video', 'v-zhipu')!r}",
+    )
+    check(
+        "厂商省略 endpoints 时按目录补齐（硅基流动图片同理）",
+        _ep("image", "v-sf") == _sf.endpoints["image"],
+        f"endpoint={_ep('image', 'v-sf')!r}",
+    )
+    check(
+        "文件里写了的地址压过目录默认值（中转 / 自建网关）",
+        _ep("video", "v-gw") == "https://gw.example.com/v4/videos/generations",
+        f"endpoint={_ep('video', 'v-gw')!r}",
+    )
+    check(
+        "没有 catalog 字段的手写厂商不会被塞进别家地址",
+        _ep("image", "v-hand") == "",
+        f"endpoint={_ep('image', 'v-hand')!r}",
+    )
+
+    # ---------------------------- 目录兜底 × 按模式细分的端点（与上一组配套）
+    # catalog 的 endpoints 是按池子（image/video）给的，一个池子只有一个地址；
+    # 而 dashscope 的 qwen-image 走多模态**同步**接口（wanx 才是异步的 text2image），
+    # 可灵视频按文生/图生分两个端点。空的 spec.endpoint 原本是个有意义的信号 ——
+    # "适配器你自己按模型和模式挑" —— 补上目录默认值等于把这个信号抹掉：
+    # qwen-image 会得到 400 "url error"，带参考图的可灵请求会被送去文生视频。
+    # 所以适配器那边必须把地址按模式改写回来，两组断言要一起看。
+    class _Intercepted(Exception):
+        """截获到出站 URL 后用来中断适配器，不让它真的发请求。"""
+
+    def _outbound_url(
+        kind: str, entry: dict, req: Any, vendors: dict | None = None
+    ) -> str:
+        spec = config.build_spec_from_entry(kind, entry, vendors or {})
+        got: list[str] = []
+
+        def _capture(method: str, url: str, **kwargs: Any) -> Any:
+            got.append(str(url))
+            raise _Intercepted(url)
+
+        real_request, real_upload = adapters.request, adapters.read_upload
+        adapters.request = _capture
+        adapters.read_upload = lambda img: ("a.png", b"\x89PNG\r\n\x1a\n", "image/png")
+        try:
+            adapters.run_adapter(
+                spec, req, None,
+                adapters.Ctx(
+                    api_key="ak:sk", key_source="selftest",
+                    timeout=1, poll_interval=1, max_poll=1,
+                ),
+            )
+        except _Intercepted:
+            pass
+        finally:
+            adapters.request, adapters.read_upload = real_request, real_upload
+        return got[0] if got else "(适配器没有发出请求)"
+
+    _mm = adapters.DASHSCOPE_QWEN_IMAGE
+    _img_req = adapters.GenRequest(kind="image", prompt="p")
+    _t2v = adapters.GenRequest(kind="video", prompt="p")
+    _i2v = adapters.GenRequest(kind="video", prompt="p", images=["a.png"])
+
+    def _ds(model: str, endpoint: str, req: Any = _img_req) -> str:
+        return _outbound_url(
+            "image",
+            {"id": "m", "model": model, "provider": "dashscope", "endpoint": endpoint},
+            req,
+        )
+
+    check(
+        "qwen-image：拿到 wanx 的 text2image 地址会改写成多模态接口",
+        _ds("qwen-image-2.0", adapters.DASHSCOPE_IMAGE) == _mm,
+        _ds("qwen-image-2.0", adapters.DASHSCOPE_IMAGE),
+    )
+    check(
+        "qwen-image：中转网关的路径前缀原样保留",
+        _ds(
+            "qwen-image-2.0",
+            "https://gw.example.com/proxy/services/aigc/text2image/image-synthesis",
+        ) == "https://gw.example.com/proxy/services/aigc/multimodal-generation/generation",
+        _ds(
+            "qwen-image-2.0",
+            "https://gw.example.com/proxy/services/aigc/text2image/image-synthesis",
+        ),
+    )
+    check(
+        "qwen-image：地址里没有 /services/ 时不猜，原样用",
+        _ds("qwen-image-2.0", "https://gw.example.com/qwen") == "https://gw.example.com/qwen",
+        _ds("qwen-image-2.0", "https://gw.example.com/qwen"),
+    )
+    check(
+        "wanx 系列不受这条改写影响（还是异步 text2image）",
+        _ds("wanx2.5-t2i-turbo", adapters.DASHSCOPE_IMAGE) == adapters.DASHSCOPE_IMAGE,
+        _ds("wanx2.5-t2i-turbo", adapters.DASHSCOPE_IMAGE),
+    )
+
+    def _kl(endpoint: str, req: Any) -> str:
+        return _outbound_url(
+            "video",
+            {"id": "m", "model": "kling-v2-master", "provider": "kling", "endpoint": endpoint},
+            req,
+        )
+
+    _kl_t2v = f"{adapters.KLING_BASE}/videos/text2video"
+    _kl_i2v = f"{adapters.KLING_BASE}/videos/image2video"
+    check(
+        "可灵：目录给的 text2video 地址在图生视频时改成 image2video",
+        _kl(_kl_t2v, _i2v) == _kl_i2v,
+        _kl(_kl_t2v, _i2v),
+    )
+    check(
+        "可灵：文生视频不会被误改",
+        _kl(_kl_t2v, _t2v) == _kl_t2v,
+        _kl(_kl_t2v, _t2v),
+    )
+    check(
+        "可灵：反方向同样成立（存的是 image2video 时文生要改回来）",
+        _kl(_kl_i2v, _t2v) == _kl_t2v,
+        _kl(_kl_i2v, _t2v),
+    )
+    check(
+        "可灵：网关前缀保留，不认识的路径原样透传",
+        _kl("https://gw.example.com/kling/videos/text2video", _i2v)
+        == "https://gw.example.com/kling/videos/image2video"
+        and _kl("https://gw.example.com/kling/v1/videos", _i2v)
+        == "https://gw.example.com/kling/v1/videos",
+        f"{_kl('https://gw.example.com/kling/videos/text2video', _i2v)} / "
+        f"{_kl('https://gw.example.com/kling/v1/videos', _i2v)}",
+    )
+
+    # 两组合起来才是用户真实踩到的场景：页面上建厂商（只写 catalog、地址被省略）
+    _page_vendors = config.build_vendors([
+        {"id": "v-zp2", "provider": "openai", "catalog": "zhipu", "api_key_env": "ZP"},
+        {"id": "v-ds2", "provider": "dashscope", "catalog": "dashscope", "api_key_env": "DS"},
+    ])
+    check(
+        "页面建的智谱厂商：请求真的打到 open.bigmodel.cn（不是 api.openai.com）",
+        _outbound_url(
+            "image", {"id": "m", "model": "cogview-4", "vendor": "v-zp2"}, _img_req, _page_vendors
+        ) == f"{catalog.get('zhipu').endpoints['image']}",
+        _outbound_url(
+            "image", {"id": "m", "model": "cogview-4", "vendor": "v-zp2"}, _img_req, _page_vendors
+        ),
+    )
+    check(
+        "页面建的百炼厂商：qwen-image 补完默认地址后仍走多模态接口",
+        _outbound_url(
+            "image", {"id": "m", "model": "qwen-image-2.0", "vendor": "v-ds2"},
+            _img_req, _page_vendors,
+        ) == _mm,
+        _outbound_url(
+            "image", {"id": "m", "model": "qwen-image-2.0", "vendor": "v-ds2"},
+            _img_req, _page_vendors,
+        ),
+    )
 
     # ------------------------------------------------ 不静默丢条目（H5 的另一半）
     # 原 _dedupe_last 把"不是 dict"和"没有 id"的条目收进一个列表然后忘了返回，
@@ -1437,6 +1626,512 @@ def check_bugfixes(check) -> None:
     finally:
         with contextlib.suppress(OSError):
             shutil.rmtree(scratch, ignore_errors=True)
+
+
+def check_bugfixes_round2(check) -> None:
+    """第二轮审查修掉的问题，逐条固化成断言。
+
+    和 check_bugfixes 一样，每条都写清"原来的写法会怎样"。分组：
+    A* = 配置层（store / config / miniyaml），B* = Web 层与适配器。
+    """
+    import os  # noqa: PLC0415
+    import shutil  # noqa: PLC0415
+    from typing import Any  # noqa: PLC0415
+
+    from mrouter import (  # noqa: PLC0415
+        adapters,
+        catalog,
+        cli,
+        config,
+        health,
+        miniyaml,
+        store,
+        webserver,
+    )
+
+    def _load(text: str) -> Any:
+        """解析失败时把异常变成返回值带出去。
+
+        这是给变异验证留的后路：若直接写 ``miniyaml.loads(x)``，一旦解析器回归成
+        会抛异常，异常会从 ``check(...)`` 的实参里冲出去，整轮自检当场中断 ——
+        后面的断言一条都不跑，本该出现的红色反而变成了"自检崩了"。
+        """
+        try:
+            return miniyaml.loads(text)
+        except Exception as exc:  # noqa: BLE001
+            return f"<{type(exc).__name__}: {exc}>"
+
+    # ------------------------------------------------ A7：块序列与父键同缩进
+    # YAML 允许块序列和父键写成同一列（compact notation）：
+    #     supports:
+    #     - text2img
+    # 原解析器只认"子级缩进必须更大"，这种写法会解析成 supports=None，紧接着弹出
+    # 下一行、报"无法解析的配置行"。装没装 PyYAML 行为还不一样 —— 装了能跑、
+    # 没装就炸，而 skill 对外承诺零依赖。
+    compact = "supports:\n- text2img\n- img2img\n"
+    want = {"supports": ["text2img", "img2img"]}
+    check(
+        "miniyaml：块序列与父键同缩进（顶层）",
+        _load(compact) == want,
+        repr(_load(compact)),
+    )
+    nested = "model: a\nparams:\n  tags:\n  - x\n  - y\n"
+    want_nested = {"model": "a", "params": {"tags": ["x", "y"]}}
+    check(
+        "miniyaml：块序列与父键同缩进（嵌套）",
+        _load(nested) == want_nested,
+        repr(_load(nested)),
+    )
+    seq_in_seq = "a:\n- - 1\n  - 2\n- - 3\n"
+    check(
+        "miniyaml：序列项里再套同缩进的序列",
+        _load(seq_in_seq) == {"a": [[1, 2], [3]]},
+        repr(_load(seq_in_seq)),
+    )
+    try:
+        import yaml  # noqa: PLC0415
+    except ImportError:
+        yaml = None
+    if yaml is not None:
+        for sample in (compact, nested, seq_in_seq, "a:\n  - 1\nb:\n- 2\n"):
+            check(
+                f"miniyaml 与 PyYAML 结果一致：{sample.splitlines()[0]!r}",
+                _load(sample) == yaml.safe_load(sample),
+                f"miniyaml={_load(sample)!r} PyYAML={yaml.safe_load(sample)!r}",
+            )
+
+    # ------------------------------------------------ A5/A6：形状写错要报配置错误
+    # 原写法直接迭代 / 解包，抛的是 AttributeError / TypeError，被 CLI 归成
+    # kind=internal —— 用户看到"内部错误"，想不到是自己配置里写错了。
+    def _err_of(fn: Any) -> str:
+        try:
+            fn()
+        except config.ConfigError as exc:
+            return f"ConfigError: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            return f"{type(exc).__name__}: {exc}"
+        return "(没有报错)"
+
+    defaults_msg = "(没跑到)"
+    supports_msg = "(没跑到)"
+    empty_msgs: dict[str, str] = {}
+    scratch = Path(tempfile.mkdtemp(prefix="media-router-r2-"))
+    previous_override = os.environ.get("MEDIA_ROUTER_CONFIG")
+    try:
+        # defaults 的校验在 load_raw 里（每一层进来时都要查），所以得走真实入口。
+        # 用 MEDIA_ROUTER_CONFIG 指到临时文件，避免碰真正的配置目录。
+        bad_defaults = scratch / "models.yaml"
+        bad_defaults.write_text("defaults: 3\nimage: {}\n", encoding="utf-8")
+        os.environ["MEDIA_ROUTER_CONFIG"] = str(bad_defaults)
+        defaults_msg = _err_of(config.load_raw)
+
+        # 空文件 / 只有注释：三种解析器必须给出同一个答案（空映射），
+        # 否则"新建一个空的 models.web.yaml"在不同环境行为分叉。
+        for name, text in (
+            ("empty.yaml", ""),
+            ("empty.yml", ""),
+            ("empty.json", ""),
+            ("comment.yaml", "# 只有一行注释\n"),
+            ("comment.yml", "# 只有一行注释\n"),
+        ):
+            target = scratch / name
+            target.write_text(text, encoding="utf-8")
+            try:
+                empty_msgs[name] = repr(config._load_structured(target))  # noqa: SLF001
+            except Exception as exc:  # noqa: BLE001
+                empty_msgs[name] = f"{type(exc).__name__}: {exc}"
+    finally:
+        if previous_override is None:
+            os.environ.pop("MEDIA_ROUTER_CONFIG", None)
+        else:
+            os.environ["MEDIA_ROUTER_CONFIG"] = previous_override
+        with contextlib.suppress(OSError):
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    check(
+        "顶层 defaults 写成标量时报配置错误（不是 AttributeError）",
+        defaults_msg.startswith("ConfigError") and "defaults" in defaults_msg,
+        defaults_msg,
+    )
+    supports_msg = _err_of(
+        lambda: config.build_spec_from_entry(
+            "image", {"id": "m", "provider": "openai", "supports": 5}, {}
+        )
+    )
+    check(
+        "supports 写成标量时报配置错误（不是 TypeError）",
+        supports_msg.startswith("ConfigError") and "supports" in supports_msg,
+        supports_msg,
+    )
+    # 逗号分隔的字符串是**允许**的写法，不能被上面那条误伤
+    try:
+        ok_supports: Any = str(
+            config.build_spec_from_entry(
+                "image",
+                {"id": "m", "provider": "openai", "supports": "text2img, img2img"},
+                {},
+            ).supports
+        )
+    except Exception as exc:  # noqa: BLE001 - 回归要变成红色，不能让自检中断
+        ok_supports = f"<{type(exc).__name__}: {exc}>"
+    check(
+        "supports 写成逗号分隔字符串仍然可用",
+        ok_supports == str(["text2img", "img2img"]),
+        ok_supports,
+    )
+
+    # ------------------------------------------------ A9：空文件 / 只有注释
+    check(
+        "空文件与只有注释的叠加层都解析成空映射（三种解析器一致）",
+        set(empty_msgs.values()) == {"{}"},
+        str(empty_msgs),
+    )
+
+    # ------------------------------------------------ A11：厂商墓碑要跳过
+    # 页面删掉一条写在 models.yaml 里的厂商时，只在叠加层写一条 ``_deleted: true``
+    # 把手写层那条盖住（不改用户手写的文件）。墓碑没有 provider —— 不跳过它就报
+    # "缺少必填字段 provider"，于是页面里删掉厂商之后，任何走 build_vendors 的
+    # 操作（比如"测真实生成"）都会直接失败，用户只看到一句莫名其妙的必填校验。
+    _vwarn: list[str] = []
+    try:
+        _vids: Any = sorted(
+            config._coerce_vendors(  # noqa: SLF001
+                [
+                    {"id": "v-gone", config.TOMBSTONE_KEY: True},
+                    {"id": "v-ok", "provider": "openai"},
+                ],
+                _vwarn,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - 回归时必须变成可读的红色，不是崩溃
+        _vids = f"<{type(exc).__name__}: {exc}>"
+    check(
+        "厂商墓碑被跳过：不报「缺少 provider」，也不出现在结果里",
+        _vids == ["v-ok"],
+        f"{_vids} warnings={_vwarn}",
+    )
+
+    # ------------------------------------------------ B1：页面送来的 options 是字符串
+    # 页面的"接口参数"是文本框，POST 过来的是原始字符串。原来写
+    # dict(body.get("options") or {})，对字符串抛 "dictionary update sequence …"，
+    # 于是同一个表单"保存"能成、"测试连通性"直接 400。
+    def _opts(raw: Any) -> Any:
+        try:
+            return store.coerce_options(raw)
+        except Exception as exc:  # noqa: BLE001
+            return f"<{type(exc).__name__}: {exc}>"
+
+    check(
+        "options 字符串能被解析成 dict（保存与测试两条路共用一套解析）",
+        _opts('{"n": 2}') == {"n": 2} and _opts("") == {} and _opts(None) == {},
+        str(_opts('{"n": 2}')),
+    )
+    for bad, why in (('{"a":', "半截 JSON"), ("[1]", "数组"), ("3", "数字")):
+        msg = _err_of(lambda b=bad: store.coerce_options(b))
+        check(
+            f"options 是{why}时报可读的配置错误",
+            msg.startswith("ConfigError") and "接口参数" in msg,
+            msg,
+        )
+    try:
+        target = webserver.ConfigApi._target_from_payload(  # noqa: SLF001
+            {"provider": "zhipu", "api_key": "k", "options": '{"quality": "hd"}'}
+        )
+        got_opts = str(target.options)
+    except Exception as exc:  # noqa: BLE001
+        got_opts = f"<{type(exc).__name__}: {exc}>"
+    check(
+        "连通性测试收到的 options 字符串不再 400",
+        got_opts == str({"quality": "hd"}),
+        got_opts,
+    )
+
+    # ------------------------------------------------ B3：localhost 打开的页面全 403
+    # 页面从 http://localhost:PORT 打开时，浏览器发的 Origin 就是 localhost，而
+    # app.origin 用的是绑定地址（127.0.0.1）。逐字比较永远不等 —— GET 能过、
+    # 每个 POST 都回 403「请求来源不是本页面」，用户只会以为"页面坏了"。
+    app = webserver.ConfigServer(host="127.0.0.1", port=8899, open_browser=False)
+    app.token = "tok"
+    handler = webserver._make_handler(app)  # noqa: SLF001
+
+    def _hdrs(**kw: str) -> Any:
+        import types  # noqa: PLC0415
+
+        return types.SimpleNamespace(
+            headers={k.replace("_", "-"): v for k, v in kw.items()}
+        )
+
+    for label, fake, want in (
+        ("Origin 是 localhost 时放行", _hdrs(Origin="http://localhost:8899"), True),
+        ("Origin 是 127.0.0.1 时放行", _hdrs(Origin="http://127.0.0.1:8899"), True),
+        ("Origin 是 [::1] 时放行", _hdrs(Origin="http://[::1]:8899"), True),
+        ("Referer 是 localhost 时放行", _hdrs(Referer="http://localhost:8899/"), True),
+        ("没有 Origin（curl）放行", _hdrs(), True),
+        ("端口不一致时拒绝", _hdrs(Origin="http://localhost:1234"), False),
+        ("外部域名时拒绝", _hdrs(Origin="http://evil.example.com:8899"), False),
+        ("协议不是 http 时拒绝", _hdrs(Origin="https://localhost:8899"), False),
+        ("Origin 是 null 时拒绝", _hdrs(Origin="null"), False),
+    ):
+        check(f"来源校验：{label}", handler._origin_ok(fake) is want, "结果不符")  # noqa: SLF001
+    check(
+        "来源校验：Host 头写 localhost 也认（不再只认绑定地址）",
+        handler._host_ok(_hdrs(Host="localhost:8899")) is True  # noqa: SLF001
+        and handler._host_ok(_hdrs(Host="evil.example.com:8899")) is False,  # noqa: SLF001
+        "Host 校验不对",
+    )
+
+    # ------------------------------------------------ B4：百炼视频漏传 watermark
+    # 图片分支的 _param_map 白名单里有 watermark，视频分支漏了 —— 同一条
+    # `--param watermark=false` 出图生效、出视频静默失效。
+    #
+    # 这里必须走 `req.extra`（也就是 `--param`）而**不能**写在 spec.params 里：
+    # params 是被 `parameters.update(spec.params)` 无条件透传的，绕过了白名单，
+    # 断言会因为错误的原因变绿（第一版就是这么写的，变异验证直接抓了出来）。
+    _ds_video: dict[str, Any] = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _capture_ds(method: str, url: str, **kwargs: Any) -> Any:
+        _ds_video.update(kwargs.get("json_body") or {})
+        raise _Stop()
+
+    real_request = adapters.request
+    adapters.request = _capture_ds
+    try:
+        spec = config.build_spec_from_entry(
+            "video",
+            {"id": "wanx2.1-t2v-turbo", "provider": "dashscope", "model": "wanx2.1-t2v-turbo"},
+            {},
+        )
+        try:
+            adapters.run_adapter(
+                spec,
+                adapters.GenRequest(
+                    kind="video",
+                    prompt="p",
+                    extra={"watermark": False, "prompt_extend": True},
+                ),
+                None,
+                adapters.Ctx(
+                    api_key="k", key_source="t", timeout=1, poll_interval=1, max_poll=1
+                ),
+            )
+        except _Stop:
+            pass
+    finally:
+        adapters.request = real_request
+    _params = (_ds_video.get("parameters") or {})
+    check(
+        "百炼视频：--param watermark / prompt_extend 会进 parameters（不再静默丢）",
+        _params.get("watermark") is False and _params.get("prompt_extend") is True,
+        str(_params),
+    )
+
+    # ------------------------------------------------ B5：provider=openai 没有视频分支
+    # 原来的图像逻辑会拿视频模型去请求 /images/generations，响应里没有 data，
+    # 报一句"响应中没有图片数据" —— 用户配的是视频模型，却看不出哪里错了。
+    check(
+        "provider=openai 的视频请求走 /videos/generations 而不是 /images/generations",
+        adapters._openai_video_target(  # noqa: SLF001
+            config.build_spec_from_entry(
+                "video",
+                {"id": "cogvideox-3", "provider": "openai", "model": "cogvideox-3"},
+                {},
+            )
+        )
+        == (adapters.OPENAI_VIDEO, adapters.ZHIPU_BASE),
+        str(
+            adapters._openai_video_target(  # noqa: SLF001
+                config.build_spec_from_entry(
+                    "video",
+                    {"id": "cogvideox-3", "provider": "openai", "model": "cogvideox-3"},
+                    {},
+                )
+            )
+        ),
+    )
+    check(
+        "智谱目录里的视频地址就是异步提交地址（与适配器默认值一致）",
+        catalog.get("zhipu").endpoints["video"] == adapters.OPENAI_VIDEO,
+        f"{catalog.get('zhipu').endpoints['video']} vs {adapters.OPENAI_VIDEO}",
+    )
+    check(
+        "查询地址从提交地址推出来（网关前缀保留）",
+        adapters._openai_video_target(  # noqa: SLF001
+            config.build_spec_from_entry(
+                "video",
+                {
+                    "id": "cogvideox-3",
+                    "provider": "openai",
+                    "model": "cogvideox-3",
+                    "endpoint": "https://gw.example.com/zhipu/videos/generations",
+                },
+                {},
+            )
+        )
+        == ("https://gw.example.com/zhipu/videos/generations", "https://gw.example.com/zhipu"),
+        "网关前缀没保留",
+    )
+    check(
+        "options.task_base 可以显式指定查询前缀",
+        adapters._openai_video_target(  # noqa: SLF001
+            config.build_spec_from_entry(
+                "video",
+                {
+                    "id": "cogvideox-3",
+                    "provider": "openai",
+                    "model": "cogvideox-3",
+                    "endpoint": "https://gw.example.com/weird/submit",
+                    "options": {"task_base": "https://gw.example.com/weird"},
+                },
+                {},
+            )
+        )[1]
+        == "https://gw.example.com/weird",
+        "task_base 没生效",
+    )
+
+    _video_body: dict[str, Any] = {}
+
+    def _capture_openai(method: str, url: str, **kwargs: Any) -> Any:
+        _video_body.update(kwargs.get("json_body") or {})
+        raise _Stop()
+
+    adapters.request = _capture_openai
+    try:
+        try:
+            adapters.run_adapter(
+                config.build_spec_from_entry(
+                    "video",
+                    {
+                        "id": "cogvideox-3",
+                        "provider": "openai",
+                        "model": "cogvideox-3",
+                        "params": {"quality": "speed"},
+                    },
+                    {},
+                ),
+                adapters.GenRequest(kind="video", prompt="p", duration=10),
+                None,
+                adapters.Ctx(
+                    api_key="k", key_source="t", timeout=1, poll_interval=1, max_poll=1
+                ),
+            )
+        except _Stop:
+            pass
+    finally:
+        adapters.request = real_request
+    check(
+        "openai 视频：model / prompt / params / --duration 都落到请求体",
+        _video_body.get("model") == "cogvideox-3"
+        and _video_body.get("prompt") == "p"
+        and _video_body.get("quality") == "speed"
+        and _video_body.get("duration") == 10,
+        str(_video_body),
+    )
+    _video_body.clear()
+    adapters.request = _capture_openai
+    try:
+        try:
+            adapters.run_adapter(
+                config.build_spec_from_entry(
+                    "video",
+                    {"id": "cogvideox-3", "provider": "openai", "model": "cogvideox-3"},
+                    {},
+                ),
+                adapters.GenRequest(kind="video", prompt="p", duration=0),
+                None,
+                adapters.Ctx(
+                    api_key="k", key_source="t", timeout=1, poll_interval=1, max_poll=1
+                ),
+            )
+        except _Stop:
+            pass
+    finally:
+        adapters.request = real_request
+    check(
+        "openai 视频：没有时长时不会凭空塞一个 duration（0 秒没有意义）",
+        "duration" not in _video_body,
+        str(_video_body),
+    )
+
+    # 图像请求不能被这条新分支带跑偏（kind 分派的另一边）
+    _img_body: dict[str, Any] = {}
+
+    def _capture_img(method: str, url: str, **kwargs: Any) -> Any:
+        _img_body["url"] = str(url)
+        _img_body.update(kwargs.get("json_body") or {})
+        raise _Stop()
+
+    adapters.request = _capture_img
+    try:
+        try:
+            adapters.run_adapter(
+                config.build_spec_from_entry(
+                    "image",
+                    {
+                        "id": "gpt-image",
+                        "provider": "openai",
+                        "model": "gpt-image-1",
+                        "endpoint": "https://gw.example.com/v1/images/generations",
+                    },
+                    {},
+                ),
+                adapters.GenRequest(kind="image", prompt="p"),
+                None,
+                adapters.Ctx(
+                    api_key="k", key_source="t", timeout=1, poll_interval=1, max_poll=1
+                ),
+            )
+        except _Stop:
+            pass
+    finally:
+        adapters.request = real_request
+    check(
+        "openai 图像请求仍然走 images/generations（没被视频分支带走）",
+        _img_body.get("url") == "https://gw.example.com/v1/images/generations"
+        and "duration" not in _img_body,
+        f"{_img_body.get('url')} {_img_body}",
+    )
+
+    # ── 断言自检：上面那些 capture 必须真的截到了请求 ──
+    # 截获函数一旦失效，所有断言都会拿空 dict 去比，看起来"全绿"其实什么都没验。
+    check(
+        "上面的出站截获确实拿到了请求体（自检的自检）",
+        bool(_ds_video) and bool(_video_body) and bool(_img_body),
+        f"ds={bool(_ds_video)} video={bool(_video_body)} img={bool(_img_body)}",
+    )
+
+    # ------------------------------------------------ C1：只允许调用用户配置的模型
+    # 用户的硬要求：严禁（模型）私自去调 API Key 下面"未添加"的模型。路由本来
+    # 就只从配置的池子里挑候选，但"指定某个模型"的入口不止 generate 一个 ——
+    # report --model 也走 find_model。所以把这条策略钉在这个唯一关卡上：
+    # 未配置的 id 一律拒绝，而且报错必须说明"这是策略"而不是含糊的"没找到"，
+    # 否则 agent 容易理解成"名字打错了"然后换个写法继续试。
+    import types as _types  # noqa: PLC0415
+
+    _cfg = config.load_config()
+    _policy = _err_of(lambda: _cfg.find_model("__not_configured_model__"))
+    check(
+        "未配置的模型 id 一律拒绝，并说明只能调用配置里已有的模型",
+        _policy.startswith("ConfigError") and "只能调用配置里已有的模型" in _policy,
+        _policy,
+    )
+    _forced = _err_of(
+        lambda: cli._resolve(  # noqa: SLF001
+            _cfg,
+            health.HealthStore(_cfg.health_path),
+            _types.SimpleNamespace(
+                kind="image", model="__not_configured_model__", image=[], supports=None
+            ),
+        )
+    )
+    check(
+        "generate / resolve 用 --model 传未配置的 id，在路由前就被挡下",
+        _forced.startswith("ConfigError") and "找不到模型 id" in _forced,
+        _forced,
+    )
 
 
 if __name__ == "__main__":

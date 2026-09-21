@@ -398,7 +398,9 @@ details.pathbar .paths{
             <option value="480p">480p（省额度）</option>
             <option value="720p">720p</option>
             <option value="1080p">1080p（更清晰、更贵）</option>
+            <option value="custom">自定义…</option>
           </select>
+          <input id="mf-resolution-custom" class="mono" placeholder="例如 540p / 2k" style="display:none; margin-top:6px">
         </div>
         <div>
           <label class="lbl" style="margin-top:0">时长（秒）</label>
@@ -407,7 +409,9 @@ details.pathbar .paths{
             <option value="3">3 秒</option>
             <option value="5">5 秒</option>
             <option value="10">10 秒</option>
+            <option value="custom">自定义…</option>
           </select>
+          <input id="mf-duration-custom" class="mono" type="number" min="1" placeholder="例如 8" style="display:none; margin-top:6px">
         </div>
       </div>
       <div class="hint">
@@ -949,14 +953,13 @@ function showModelForm(model){
     setKind("image");
   }
   /* ④ 生成规格回填：preset 里没有的值归到「自定义…」 */
-  const size = String(params.size || "");
-  const preset = el("mf-size-preset");
-  const known = Array.from(preset.options).some(o=>o.value===size && o.value!=="custom");
-  preset.value = size ? (known ? size : "custom") : "";
-  el("mf-size-custom").value = (size && !known) ? size : "";
-  onSizePresetChange();
-  el("mf-resolution").value = String(params.resolution || "");
-  el("mf-duration").value = params.duration!==undefined && params.duration!=="" ? String(params.duration) : "";
+  fillPreset("mf-size-preset", "mf-size-custom", String(params.size || ""));
+  fillPreset("mf-resolution", "mf-resolution-custom", String(params.resolution || ""));
+  fillPreset("mf-duration", "mf-duration-custom",
+    params.duration!==undefined && params.duration!=="" ? String(params.duration) : "");
+  syncPresetCustom("mf-size-preset", "mf-size-custom");
+  syncPresetCustom("mf-resolution", "mf-resolution-custom");
+  syncPresetCustom("mf-duration", "mf-duration-custom");
   el("mf-w-label").textContent = el("mf-weight").value;
   onVendorPick();
 }
@@ -974,11 +977,26 @@ function setKind(kind){
   onVendorPick();
 }
 
-/* 图像尺寸：选了「自定义…」才显示手填框 */
-function onSizePresetChange(){
-  const custom = el("mf-size-preset").value === "custom";
-  el("mf-size-custom").style.display = custom ? "" : "none";
-  if(custom) el("mf-size-custom").focus();
+/* 回填一个「预设下拉 + 自定义手填框」组合。
+   值不在预设选项里时必须落到「自定义…」——直接给 select.value 赋一个不存在的值，
+   浏览器会把 value 置成空串，提交时空串又被后端理解成"用户清空了输入框"，
+   于是编辑一次就静默删掉这个参数。size / resolution / duration 三处都要走这里。 */
+function fillPreset(selectId, customId, value){
+  const select = el(selectId);
+  const known = Array.from(select.options).some(o=>o.value===value && o.value!=="custom");
+  select.value = value ? (known ? value : "custom") : "";
+  el(customId).value = (value && !known) ? value : "";
+}
+
+/* 选了「自定义…」才显示手填框 */
+function syncPresetCustom(selectId, customId){
+  el(customId).style.display = el(selectId).value === "custom" ? "" : "none";
+}
+
+/* 用户手动切换下拉时用：除了显示手填框，顺手聚焦过去 */
+function onPresetChange(selectId, customId){
+  syncPresetCustom(selectId, customId);
+  if(el(selectId).value === "custom") el(customId).focus();
 }
 
 function collectModelPayload(){
@@ -1001,8 +1019,13 @@ function collectModelPayload(){
     }
     params.size = size || "";
   }else if(kind==="video"){
-    params.resolution = el("mf-resolution").value || "";
-    params.duration = el("mf-duration").value ? parseInt(el("mf-duration").value,10) : "";
+    let resolution = el("mf-resolution").value;
+    if(resolution==="custom") resolution = el("mf-resolution-custom").value.trim().toLowerCase().replace(/\s+/g,"");
+    params.resolution = resolution || "";
+    let duration = el("mf-duration").value;
+    if(duration==="custom") duration = el("mf-duration-custom").value.trim();
+    if(duration && !/^\d+$/.test(duration)) throw new Error("自定义时长应填整数秒，例如 8");
+    params.duration = duration ? parseInt(duration,10) : "";
   }
   return {
     id: el("mf-id").value || "",
@@ -1215,7 +1238,9 @@ el("btn-real-test-model").addEventListener("click", ()=>{
   catch(e){ showError(e.message); }
 });
 el("mf-vendor").addEventListener("change", onVendorPick);
-el("mf-size-preset").addEventListener("change", onSizePresetChange);
+el("mf-size-preset").addEventListener("change", ()=>onPresetChange("mf-size-preset","mf-size-custom"));
+el("mf-resolution").addEventListener("change", ()=>onPresetChange("mf-resolution","mf-resolution-custom"));
+el("mf-duration").addEventListener("change", ()=>onPresetChange("mf-duration","mf-duration-custom"));
 el("mf-weight-range").addEventListener("input", ()=>{
   el("mf-weight").value = el("mf-weight-range").value;
   el("mf-w-label").textContent = el("mf-weight-range").value;
