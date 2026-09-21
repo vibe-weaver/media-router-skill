@@ -31,7 +31,8 @@
 不调任何 HTTP。返回一条"请你去调 ImageGen / VideoGen"的指令（`status: delegate`，退出码 3），
 由 agent 用它自己环境里的内置能力完成。
 
-适合当兜底：放在最高的 priority 上，保证没配 Key 时任务也不会彻底断掉。
+适合当兜底：priority 填一个**最大**的数（如 9，数值越小越优先），保证它总排在真模型后面、
+没配 Key 时任务也不会彻底断掉。填 1 会反过来 —— 它会抢在真模型前面，每次生成都直接委托。
 
 ```yaml
 - id: builtin-imagen
@@ -117,7 +118,7 @@
 |---|---|
 | `api_key_env` | 建议 `DASHSCOPE_API_KEY` |
 | `endpoint` | 图片默认 `.../services/aigc/text2image/image-synthesis`；视频默认 `.../services/aigc/video-generation/video-synthesis` |
-| `params` | 图片：`size`（如 `1024*1024`）、`style`、`prompt_extend`、`watermark`；视频：`size`、`duration` |
+| `params` | 图片：`size`（如 `1024*1024`）、`style`、`prompt_extend`、`watermark`；视频：`size`、`resolution`、`prompt_extend`、`watermark`，外加单独处理的 `duration`（见下） |
 | `options.task_base` | 任务**查询**地址的前缀，默认从 `endpoint` 自动推导（见下）；推不出来时才需要手填 |
 
 如果 `endpoint` 指的是中转网关或自建代理，查询地址会**自动跟着走**：
