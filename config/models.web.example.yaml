@@ -1,0 +1,43 @@
+# ============================================================================
+# 网页配置页面的产出示例（media_router.py web 会自动生成你自己的那份）
+# ----------------------------------------------------------------------------
+# 说明：真正被页面写入的是 config/models.web.yaml，而它**不入库**（见 .gitignore）——
+# 里面会有你自己加的厂商、私有网关地址和模型名，属于个人信息，不适合公开。
+# 本文件只是格式示例，仓库里保留它，是为了让人一眼看懂页面会写出什么。
+#
+# 加载顺序：models.yaml 先加载，models.web.yaml 叠加在上；同 id 的条目以后者为准。
+# 密钥不在这份文件里，而在 config/secrets.web.yaml（同样在 .gitignore 里）。
+# ============================================================================
+
+version: 1
+vendors: []
+# 示例（页面自动生成后的样子，仅供参考格式）：
+# vendors:
+#   - id: v-zhipu
+#     provider: openai
+#     catalog: zhipu
+#     label: 智谱 BigModel
+#     endpoints:
+#       image: https://open.bigmodel.cn/api/paas/v4/images/generations
+#       video: https://open.bigmodel.cn/api/paas/v4/videos/generations
+#     api_key_env: MY_API_KEY
+image:
+  strategy: priority_then_weight
+  models: []
+# 示例：
+# image:
+#   strategy: priority_then_weight
+#   models:
+#     - id: glm-image
+#       model: glm-image
+#       priority: 1
+#       weight: 50.0
+#       enabled: true
+#       supports:
+#         - text2img
+#       vendor: v-zhipu
+#     - id: wanx-2.5
+#       _deleted: true
+video:
+  strategy: priority_then_weight
+  models: []

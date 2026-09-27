@@ -151,8 +151,12 @@ python3 scripts/media_router.py web
 
 | 文件 | 内容 | 会被提交吗 |
 |---|---|---|
-| `config/models.web.yaml` | 厂商 + 模型（**不含密钥**） | 会（无敏感信息） |
+| `config/models.web.yaml` | 厂商 + 模型（**不含密钥**） | 不会，已在 `.gitignore` |
 | `config/secrets.web.yaml` | 密钥 | 不会，已在 `.gitignore` |
+
+> 虽然 `models.web.yaml` 里没有密钥，但它记录的是**你自己加了哪些厂商、用了哪个私有网关、
+> 启用了哪些模型**，同样属于个人信息，所以和密钥一起排除在版本库外。
+> 仓库里的 `config/models.web.example.yaml` 是纯示例，只用来说明页面会写出什么格式。
 
 这两份是**叠加层**：加载时先读你手写的 `models.yaml` / `secrets.yaml`，再把这两份盖上去，同 id 以页面为准。
 也就是说 **你在手写文件里的内容和注释一个字都不会丢**。
@@ -443,8 +447,11 @@ media-router/
 ├── assets/config.html        # 网页配置界面（单文件，零依赖）
 ├── config/
 │   ├── models.yaml           # ★ 你维护的模型池
-│   ├── models.web.yaml       # 配置页面生成的厂商/模型（叠加层）
+│   ├── models.web.yaml       # 配置页面生成的厂商/模型（叠加层，**不入库**）
+│   ├── models.web.example.yaml # 上面那份的格式示例（入库）
 │   └── secrets.example.yaml  # 密钥样例，复制成 secrets.yaml
+│   ├── secrets.yaml          # 真实密钥（不入库，本目录里可能没有）
+│   └── secrets.web.yaml      # 页面写入的密钥（不入库，本目录里可能没有）
 ├── scripts/
 │   ├── media_router.py       # CLI 入口
 │   ├── selftest.py           # 无需 Key 的路由/生成端到端自检
@@ -543,11 +550,36 @@ id 会被直接拒绝：
 - 密钥**只**存在 `config/secrets.yaml`（手写）或 `config/secrets.web.yaml`（网页配置写入），
   两者都已在 `.gitignore` 里，不会进入版本库。仓库里的 `config/secrets.example.yaml` 是空白模板，
   复制成 `secrets.yaml` 填入真实值即可
-- `config/models.yaml` / `config/models.web.yaml` 只含环境变量名（如 `api_key_env: ARK_API_KEY`），
+- `config/models.yaml`（你手写的模型池）只含环境变量名（如 `api_key_env: ARK_API_KEY`），
   不含密钥本身，可以安全提交
+- `config/models.web.yaml`（配置页面生成）虽然也没有密钥，但含你的厂商清单和私有网关地址，
+  **同样不入库**；仓库里只留 `models.web.example.yaml` 作格式示例
 - `state/`（熔断状态）和 `outputs/`（生成产物）同样不入库
-- 开发自查：改动配置相关代码后，可以 grep 一遍密钥特征确认没有误提交：
-  `grep -rInE "sk-[A-Za-z0-9_-]{10,}" --include="*.yaml" config/` 应当无输出
+
+推送到公开仓库前，建议跑一遍自查：
+
+```bash
+# 1) 密钥特征（应无输出）
+grep -rInE "sk-[A-Za-z0-9_-]{10,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}" config/ scripts/
+
+# 2) 确认个人配置文件没被 git 盯上（两个都应输出规则来源）
+git check-ignore -v config/secrets.web.yaml config/models.web.yaml
+
+# 3) 确认待提交清单里没有它们
+git status --short
+```
+
+> **密钥一旦真的进过版本库，删文件是没用的** —— 历史里仍然翻得到。那时的正确处理是
+> 先去平台**吊销/轮换**那把 Key，再考虑是否清理历史（见下）。
+
+### 已经推上去的敏感数据怎么办
+
+| 情况 | 处理 |
+|---|---|
+| 密钥进了某次提交 | 先吊销轮换 Key（这一步不能省），再用 `git filter-repo` 清历史，`git push --force` 覆盖远端 |
+| 只是本地文件、从未 `git add` | 删掉或改成占位符即可，无需动历史 |
+| 提交**元数据**里带了个人邮箱 | 用 `git filter-repo --email-callback` 改成 GitHub noreply 地址后强推 |
+| 仓库已在公开平台 | 强推后旧提交短期内仍可能被 fork / 缓存访问到，所以轮换优先于清理 |
 
 ---
 
