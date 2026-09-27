@@ -1,19 +1,17 @@
 # ============================================================================
-# 这个文件由配置页面生成（media_router.py web），不需要手动编辑。
+# 网页配置页面的产出示例（media_router.py web 会自动生成你自己的那份）
 # ----------------------------------------------------------------------------
-# 这里展示的是一份示例：用户在网页上添加了一个智谱厂商和一个模型，
-# 并隐藏了 models.yaml 里不需要的默认模型（_deleted: true 即"隐藏"）。
+# 说明：真正被页面写入的是 config/models.web.yaml，而它**不入库**（见 .gitignore）——
+# 里面会有你自己加的厂商、私有网关地址和模型名，属于个人信息，不适合公开。
+# 本文件只是格式示例，仓库里保留它，是为了让人一眼看懂页面会写出什么。
 #
-# 加载顺序：models.yaml 先加载，本文件叠加在上；同 id 的条目以本文件为准。
-# 密钥不在这个文件里，而在 config/secrets.web.yaml（.gitignore 已排除）。
-#
-# 首次使用建议直接运行 `python scripts/media_router.py web`，
-# 页面会自动生成属于你自己的这一份。
+# 加载顺序：models.yaml 先加载，models.web.yaml 叠加在上；同 id 的条目以后者为准。
+# 密钥不在这份文件里，而在 config/secrets.web.yaml（同样在 .gitignore 里）。
 # ============================================================================
 
 version: 1
 vendors: []
-# 示例（页面自动生成，仅供参考格式）：
+# 示例（页面自动生成后的样子，仅供参考格式）：
 # vendors:
 #   - id: v-zhipu
 #     provider: openai
@@ -26,7 +24,7 @@ vendors: []
 image:
   strategy: priority_then_weight
   models: []
-# 示例（页面自动生成，仅供参考格式）：
+# 示例：
 # image:
 #   strategy: priority_then_weight
 #   models:

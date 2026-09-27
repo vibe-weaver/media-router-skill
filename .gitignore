@@ -26,8 +26,11 @@ config/*.local-backup*
 *.p12
 *.pfx
 
-# 说明：config/models.web.yaml 是配置页面生成的厂商/模型清单，
-# 里面只有环境变量名、没有密钥，按设计是可以提交的。
+# 配置页面生成的厂商/模型清单：含你自己的厂商名、私有网关地址、启用了哪些模型，
+# 属于个人配置，不入库。仓库里改由 config/models.web.example.yaml（纯示例）代替。
+config/models.web.yaml
+config/models.web.yml
+config/models.web.json
 
 # 运行时状态与产物
 state/

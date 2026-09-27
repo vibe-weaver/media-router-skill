@@ -214,7 +214,8 @@ python scripts/media_router.py web
   - 真实测试内部先跑一遍只读预检，预检没过就不再花钱。
 - 页面写的是 `config/models.web.yaml`（厂商+模型，不含密钥）和 `config/secrets.web.yaml`。
   这两个文件**叠加**在用户手写的 `models.yaml` / `secrets.yaml` 之上，同 id 以页面为准，
-  **绝不会覆盖用户手写的内容和注释**。
+  **绝不会覆盖用户手写的内容和注释**。两份都在 `.gitignore` 里 —— 前者含用户自己的厂商
+  与私有网关地址，同样属于个人信息，不入库。
 - 只用 `MEDIA_ROUTER_CONFIG` / `MEDIA_ROUTER_SECRETS` 指向别的文件时进入只读模式，
   写接口返回 409，页面会提示原因。
 - 页面是给人在终端里用的交互命令，会一直阻塞到 Ctrl-C。**你自己不要用 Bash 阻塞调用它。**
