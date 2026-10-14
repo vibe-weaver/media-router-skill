@@ -114,6 +114,16 @@
 
 Windows 下 `~` 指 `C:\Users\<你>`。
 
+### 从 DSH 插件市场装（deepseek harness）
+
+不想手动复制就走这条路：在 DSH 里打开插件市场，搜「图片/视频生成调度」，点一键安装。
+装完落在 `~/.agents/skills/media-router/` —— 它和 `~/.dsh/skills/` 都是 DSH 的用户级
+skill 根目录，会被一起扫描，所以新开一个会话就能用，不用再手动复制。
+
+市场装的是 Release 里附带的 pack 包，已经包含 `SKILL.md`、`scripts/`、`config/`、
+`references/` 和 `assets/`。仓库根目录的 `tools/`（打包脚本）与 `pack/`（上架元数据）
+只服务于发布流程，不会进到你机器上的 skill 目录里。
+
 ---
 
 ## 快速开始
