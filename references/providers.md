@@ -97,7 +97,7 @@
   priority: 3
   weight: 10
   supports: [text2video, img2video]
-  api_key_env: MY_API_KEY
+  api_key_env: ZHIPU_API_KEY
   endpoint: https://open.bigmodel.cn/api/paas/v4/videos/generations
   params:
     quality: speed        # quality 更清晰、speed 更便宜
@@ -432,7 +432,7 @@ kind 不匹配时宁可不发，并留一行日志说明（不是静默忽略）
 |---|---|
 | `status: error`，`fallback_trail[].kind: config` | 缺 API Key。核对 `api_key_env` 的名字与实际环境变量是否一致 |
 | `will_attempt` 里只有 `builtin-*` | 所有第三方模型都缺 Key，被跳过了 |
-| `HTTP 401` / `403` | Key 无效、过期，或鉴权方式写错（可灵/ fal 的格式和其他家不一样） |
+| `HTTP 401` / `403` | Key 无效、过期，或鉴权方式写错（可灵/ fal 的格式和其他家不一样）。**用中转站/自建网关时最常见的原因是把 `endpoint` 留成了官方默认地址** —— 那等于拿中转站发的 Key 去敲官网，必然 401 |
 | `HTTP 404` | `endpoint` 或 `model` 名写错。方舟的 `model` 必须是控制台里的模型 ID 或 `ep-xxx` |
 | `HTTP 429` | 限流。脚本已自动重试 2 次；仍失败说明额度用尽 |
 | `未拿到 task_id` | `task_id_path` 写错了，或接口返回结构变了 |
