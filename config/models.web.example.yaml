@@ -20,7 +20,7 @@ vendors: []
 #     endpoints:
 #       image: https://open.bigmodel.cn/api/paas/v4/images/generations
 #       video: https://open.bigmodel.cn/api/paas/v4/videos/generations
-#     api_key_env: MY_API_KEY
+#     api_key_env: ZHIPU_API_KEY
 image:
   strategy: priority_then_weight
   models: []

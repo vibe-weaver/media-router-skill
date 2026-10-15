@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- PROBE-MARKER-12345 --><html lang="zh-CN" data-page-node-id="o5VY1ssyLKtEf8SBHJVvoN">
+<html lang="zh-CN" data-page-node-id="o5VY1ssyLKtEf8SBHJVvoN">
 <head data-page-node-id="tVzXV0khhG9YHpiMPVvRDj">
 <meta charset="UTF-8" data-page-node-id="vLQ8PwEfqOlydjlj9jKW7h">
 <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="CAeSCk0cE7HUMb6FMsz9v8">
@@ -128,6 +128,12 @@ details.adv summary::-webkit-details-marker{display:none}
 details.adv summary:before{content:"▸ "; color:var(--faint)}
 details.adv[open] summary:before{content:"▾ "}
 details.adv .inner{padding-top:12px}
+/* 中转站/自建网关用户的必读项：这里的接口地址不改，等于拿网关发的 Key 去敲官网，
+   必然 401。原来挤在 summary 的 muted 小字里等于没说，得单独拎出来。 */
+details.adv summary .must{
+  color:var(--err); font-weight:600;
+  background:var(--err-soft); padding:1px 7px; border-radius:6px;
+}
 .mlist{display:flex; flex-direction:column; gap:8px}
 .mitem{
   display:flex; gap:12px; align-items:center; padding:11px 13px; border:1px solid var(--line);
@@ -256,7 +262,7 @@ details.pathbar .paths{
       <div id="vf-keyfields" data-page-node-id="lFdmtdooPVaDewNqG7hjSv"></div>
 
       <details class="adv" data-page-node-id="FRfv927efXNQEOhNZ92vbc">
-        <summary data-page-node-id="IGpEnFnCURDkbwXoi9Hq7j">高级选项（一般不用改）</summary>
+        <summary data-page-node-id="IGpEnFnCURDkbwXoi9Hq7j">高级选项（官方平台无需改动；<span class="must">用中转站/自建网关时必须在这里改接口地址</span>）</summary>
         <div class="inner" data-page-node-id="mydUQVxEZmOhhy6b07KSEG">
           <label class="lbl" data-page-node-id="ZidQuvQXEVt5pDokPX78ov">显示名称</label>
           <input id="vf-label" placeholder="留空则用厂商默认名称" data-page-node-id="C1ArJKOIujg5AbWdEq7kEq">
@@ -264,23 +270,23 @@ details.pathbar .paths{
           <div class="grid2" style="margin-top:14px" data-page-node-id="N5FEGWJm9lvcxlkdBhqQtj">
             <div data-page-node-id="9VGjziyApwBiSTvJSBtDs6">
               <label class="lbl" style="margin-top:0" data-page-node-id="XBGBBH7ARmNAV6AK2d0Kx7">图像接口地址</label>
-              <input id="vf-ep-image" class="mono" placeholder="留空使用默认地址" data-page-node-id="klYADQ7IMwLsNG3tX0N1Dr">
+              <input id="vf-ep-image" class="mono" placeholder="留空＝该平台官方地址" data-page-node-id="klYADQ7IMwLsNG3tX0N1Dr">
             </div>
             <div data-page-node-id="fjWebCbax1ZHhyIRH1OcHN">
               <label class="lbl" style="margin-top:0" data-page-node-id="mggtzJs8jDOFBUrmlK7QLB">视频接口地址</label>
-              <input id="vf-ep-video" class="mono" placeholder="留空使用默认地址" data-page-node-id="rHcSMOKfd2n591zulV0z7c">
+              <input id="vf-ep-video" class="mono" placeholder="留空＝该平台官方地址" data-page-node-id="rHcSMOKfd2n591zulV0z7c">
             </div>
           </div>
-          <div class="hint" data-page-node-id="RslwNAPwG5ltQChLDO8chy">不确定就不要填，程序内置了各平台官方地址。</div>
+          <div class="hint" data-page-node-id="RslwNAPwG5ltQChLDO8chy">留空就是用各平台的官方地址；<b>但用中转站 / 自建网关时不能留空</b> —— 那等于拿网关发的 Key 去敲官网，必然 401，必须把地址改成你自己的网关地址。</div>
 
+          <div id="vf-options-box">
           <label class="lbl" style="margin-top:16px" data-page-node-id="ICbUF52GgRlXo61RDZ86Zt">接口参数（options，JSON）</label>
           <textarea id="vf-options" class="mono" rows="7"
             style="width:100%; padding:9px 11px; border:1px solid var(--line-strong);
                    border-radius:8px; font-size:12.5px; line-height:1.6; resize:vertical"
             placeholder='{"auth": {"type": "bearer"}}'></textarea>
           <div class="hint" data-page-node-id="z1V04BSbQ4OoHxVSBAp2rH">
-            只有「自定义接口（高级）」需要填这块 —— 它没有内置协议，得靠这些参数说明
-            "请求怎么发、结果从哪儿取"。内置平台（火山、百炼、可灵…）留空即可。
+            自定义接口没有内置协议，得靠这块说明「请求怎么发、结果从哪儿取」。
           </div>
           <div class="hint" data-page-node-id="fb4cKZEZp4hbQab1VeLH2E">
             最小可用示例（同步接口，提交后响应里直接带产物地址）：
@@ -300,6 +306,7 @@ details.pathbar .paths{
 }</pre>
           </div>
           <div class="hint" data-page-node-id="5Ckq4Fc6qBD00F0RKh8W00">字段含义见 references/providers.md 的 generic_http 一节。</div>
+          </div>
         </div>
       </details>
 
@@ -479,37 +486,45 @@ let pick = {catalog_key:"", kind:"image", extra:false, editingVendor:null, editi
    原生是阻塞式系统弹窗，样式割裂、长文案被截断，还会冻结整个页面。
    用法：const ok = await uiConfirm("删除模型", "确定要删除 xxx 吗？", "删除"); */
 function uiConfirm(title, text, okLabel){
+  let mask = el("modal-mask");
+  if(!mask){
+    mask = document.createElement("div");
+    mask.id = "modal-mask";
+    mask.innerHTML =
+      '<div id="modal-box" role="alertdialog" aria-modal="true">'+
+      '<h4 id="modal-title"></h4><p id="modal-text"></p>'+
+      '<div class="mactions">'+
+      '<button type="button" id="modal-cancel">取消</button>'+
+      '<button type="button" class="danger" id="modal-ok"></button>'+
+      '</div></div>';
+    document.body.appendChild(mask);
+  }
+  /* 遮罩和按钮只建一次，但 Promise 和监听必须每次调用各来一套，用完即摘。
+     旧写法把 close 和监听一起关在 if(!mask) 里，只有**第一次**调用能拿到真正
+     会 resolve 的那个 close；第二次起，点确定走到的是上一次的 close，resolve 的
+     是上一次那个早已 settle 的 Promise —— 本次 await 永远不返回。用户看到的就是
+     「弹窗点了确定没反应，刷新一次才好（而且只再好一次）」。 */
   return new Promise(resolve=>{
-    let mask = el("modal-mask");
-    if(!mask){
-      mask = document.createElement("div");
-      mask.id = "modal-mask";
-      mask.innerHTML =
-        '<div id="modal-box" role="alertdialog" aria-modal="true">'+
-        '<h4 id="modal-title"></h4><p id="modal-text"></p>'+
-        '<div class="mactions">'+
-        '<button type="button" id="modal-cancel">取消</button>'+
-        '<button type="button" class="danger" id="modal-ok"></button>'+
-        '</div></div>';
-      document.body.appendChild(mask);
-      /* 两个按钮 + 点遮罩关闭 + Escape 关闭，都走同一个收尾函数 */
-      mask.addEventListener("click", ev=>{
-        if(ev.target === mask){ close(false); return; }
-        if(ev.target.id === "modal-cancel"){ close(false); return; }
-        if(ev.target.id === "modal-ok"){ close(true); return; }
-      });
-      document.addEventListener("keydown", ev=>{
-        if(ev.key === "Escape" && mask.classList.contains("show")){ close(false); }
-      });
-      let closer = null;
-      function close(result){
-        mask.classList.remove("show");
-        if(closer){ clearTimeout(closer); closer = null; }
-        if(document.activeElement && document.activeElement.closest("#modal-box")) document.activeElement.blur();
-        resolve(result);
-      }
-      mask._close = close;
+    let done = false;
+    function close(result){
+      if(done) return;          /* 点确定后又按 Escape 之类，别重复收尾 */
+      done = true;
+      mask.classList.remove("show");
+      mask.removeEventListener("click", onClick);
+      document.removeEventListener("keydown", onKey);
+      if(document.activeElement && document.activeElement.closest("#modal-box")) document.activeElement.blur();
+      resolve(result);
     }
+    /* 两个按钮 + 点遮罩关闭 + Escape 关闭，都走同一个收尾函数 */
+    function onClick(ev){
+      if(ev.target === mask || ev.target.id === "modal-cancel"){ close(false); return; }
+      if(ev.target.id === "modal-ok"){ close(true); return; }
+    }
+    function onKey(ev){
+      if(ev.key === "Escape" && mask.classList.contains("show")) close(false);
+    }
+    mask.addEventListener("click", onClick);
+    document.addEventListener("keydown", onKey);
     el("modal-title").textContent = title;
     el("modal-text").textContent = text;
     el("modal-ok").textContent = okLabel || "确定";
@@ -689,6 +704,7 @@ function showVendorForm(vendor){
   el("vf-ep-video").value = vendor && vendor.endpoints ? (vendor.endpoints.video||"") : "";
   el("vf-options").value = (vendor && vendor.options && Object.keys(vendor.options).length)
     ? JSON.stringify(vendor.options, null, 2) : "";
+  syncOptionsBox();
   renderKeyFields(vendor);
   /* 表单在厂商列表下面，列表一长就跑到屏幕外去了 —— 不滚过去的话，
      用户会觉得"点了没反应"。 */
@@ -705,6 +721,15 @@ function renderUnknownCatalog(vendor){
     '所以没法自动给出要填哪些密钥。<br>'+
     '常见原因是它由更早的版本写入、或者手写时写错了 catalog 字段。<br>'+
     '建议：在下面重新点一个平台卡片，再保存一次即可修正。</div>';
+}
+
+/* 内置平台的 options 是手写 YAML 的逃生口（task_base / inputs / version…），
+   对页面用户没有意义 —— 展示了只会让人以为自己漏填了什么。只有完全配置驱动的
+   自定义接口需要这块。注意只切显示、绝不清空：内置厂商的 YAML 里可能真写着
+   options，值一旦被抹掉，保存时就等于把它删了。 */
+function syncOptionsBox(){
+  const c = catalogEntry(pick.catalog_key);
+  el("vf-options-box").style.display = (c && c.needs_options) ? "block" : "none";
 }
 
 function renderKeyFields(vendor){
@@ -1169,13 +1194,22 @@ el("btn-test-vendor").addEventListener("click", ()=>{
 });
 /* 选中一个厂商卡片。click 和键盘（回车/空格）共用这一段，避免两处逻辑各写各的。 */
 function selectProvider(pkey){
+  const prev = catalogEntry(pick.catalog_key);
   pick.catalog_key = pkey;
   renderProviderGrid();
   el("vf-fields").style.display = "block";
   const c = catalogEntry(pick.catalog_key);
-  el("vf-ep-image").value = (c.endpoints && c.endpoints.image) || "";
-  el("vf-ep-video").value = (c.endpoints && c.endpoints.video) || "";
+  /* 只替换"还停在上一个平台默认值"的地址。用户自己填过的中转站/网关地址不能
+     被静默冲掉 —— 冲掉之后框里显示的是 api.openai.com 这种官方默认值，看着像
+     系统给的，用户不会去怀疑它，然后拿中转站的密钥敲官网，必然 401。 */
+  ["image","video"].forEach(k=>{
+    const input = el("vf-ep-"+k);
+    const typed = input.value.trim();
+    const wasDefault = (prev && prev.endpoints && prev.endpoints[k]) || "";
+    if(!typed || typed === wasDefault) input.value = (c && c.endpoints && c.endpoints[k]) || "";
+  });
   renderKeyFields(pick.editingVendor ? vendorById(pick.editingVendor) : null);
+  syncOptionsBox();
 }
 el("provider-grid").addEventListener("click", ev=>{
   const card = ev.target.closest(".pick[data-pkey]");

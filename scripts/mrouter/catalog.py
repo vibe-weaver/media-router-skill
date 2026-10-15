@@ -43,7 +43,11 @@ class ProviderEntry:
     #: 要么这个平台根本没有列表接口 —— 后者必须如实告诉用户，不能假装拉过了。
     list_models: dict[str, Any] = field(default_factory=dict)
     signup: str = ""
-    advanced: bool = False
+    #: 界面要不要展示「接口参数（options，JSON）」。
+    #: 只有完全配置驱动的自定义接口需要；内置平台的 options 是手写 YAML 的逃生口
+    #: （task_base / inputs / version 之类），对页面用户没有意义，展示了只会让人
+    #: 以为自己漏填了什么。
+    needs_options: bool = False
     keyless: bool = False
 
 
@@ -70,7 +74,7 @@ CATALOG: list[ProviderEntry] = [
         key="volcengine",
         label="火山方舟（即梦 / Seedance）",
         provider="volcengine",
-        beginner="字节跳动的模型服务。图片用即梦，视频用 Seedance。国内访问快，推荐新手先用这家。",
+        beginner="字节跳动自家的方舟协议，只能连火山官方地址 —— 用中转站/自建网关请选「OpenAI 及兼容网关」。出图用即梦（Seedream），出视频用 Seedance，国内直连。",
         kinds=["image", "video"],
         key_fields=[
             KeyField(
@@ -106,7 +110,7 @@ CATALOG: list[ProviderEntry] = [
         key="dashscope",
         label="阿里云百炼（通义万相）",
         provider="dashscope",
-        beginner="阿里云的通义万相系列，图片和视频都有，有免费额度。",
+        beginner="阿里云自家的百炼协议，只能连百炼官方地址，中转站不适用。通义万相出图、也能出视频，有免费额度。",
         kinds=["image", "video"],
         key_fields=[
             KeyField(
@@ -141,7 +145,7 @@ CATALOG: list[ProviderEntry] = [
         key="kling",
         label="可灵（快手）",
         provider="kling",
-        beginner="快手可灵，视频效果口碑好。需要一对密钥（AccessKey + SecretKey）。",
+        beginner="快手自家协议，只能连可灵官方地址。鉴权方式和别家不一样：要用 AccessKey + SecretKey 拼成一对填进来。视频效果口碑好。",
         kinds=["image", "video"],
         key_fields=[
             KeyField(
@@ -170,14 +174,28 @@ CATALOG: list[ProviderEntry] = [
     ),
     ProviderEntry(
         key="openai",
-        label="OpenAI",
+        label="OpenAI 及兼容网关",
         provider="openai",
-        beginner="OpenAI 官方的 gpt-image-1 / DALL·E。国内需要自备网络条件。",
-        kinds=["image"],
+        beginner="OpenAI 官方，以及任何兼容 /v1/images/generations 的网关（中转站、自建代理等都算）。用中转站就点这张，再把「高级选项」里的接口地址换成网关地址：留空会走 api.openai.com，中转站的 Key 打不通官网。视频走的是 OpenAI 风格异步协议（智谱那套 /videos/generations），地址同样要换成网关的。",
+        kinds=["image", "video"],
         key_fields=[
-            KeyField(env="OPENAI_API_KEY", label="API Key", placeholder="sk-...")
+            KeyField(
+                env="OPENAI_API_KEY",
+                label="API Key",
+                placeholder="sk-...",
+                hint="官方 OpenAI 和中转站/自建网关的 Key 都填这里",
+            )
         ],
-        endpoints={"image": "https://api.openai.com/v1/images/generations"},
+        endpoints={
+            "image": "https://api.openai.com/v1/images/generations",
+            # OpenAI 官方没有 /videos/generations 这个路径，本仓库的视频协议是
+            # 「OpenAI 风格异步任务」那套（提交 /videos/generations、查询
+            # /async-result/{id}，见 adapters.OPENAI_VIDEO），参考实现是智谱。
+            # 这里把出处地址写出来是有意的：留空并不会发到别处，适配器照样会
+            # 静默回落到同一个地址（adapters._openai_video_target），用户反而
+            # 看不见自己实际打到了哪台机器。
+            "video": f"{ZHIPU}/videos/generations",
+        },
         suggestions={"image": ["gpt-image-1", "dall-e-3"]},
         auth_check={
             "url": "https://api.openai.com/v1/models",
@@ -196,7 +214,7 @@ CATALOG: list[ProviderEntry] = [
         key="siliconflow",
         label="硅基流动 SiliconFlow",
         provider="openai",
-        beginner="国内聚合平台，兼容 OpenAI 接口，模型多、价格低，适合先试水。",
+        beginner="国内聚合平台，接口本身就是 OpenAI 协议，点这张会自动预填硅基的官方地址。模型多、价格低，适合试水；用别家的中转站请选「OpenAI 及兼容网关」。",
         kinds=["image"],
         key_fields=[
             KeyField(env="SILICONFLOW_API_KEY", label="API Key", placeholder="sk-...")
@@ -222,7 +240,7 @@ CATALOG: list[ProviderEntry] = [
         key="replicate",
         label="Replicate",
         provider="replicate",
-        beginner="海外模型托管平台，FLUX、SDXL 等开源模型都能跑。",
+        beginner="海外模型托管平台，用的是 Replicate 自有协议（不是 OpenAI 协议），只能连 replicate.com。FLUX、SDXL 等开源模型都能跑。",
         kinds=["image", "video"],
         key_fields=[
             KeyField(env="REPLICATE_API_TOKEN", label="API Token", placeholder="r8_...")
@@ -239,7 +257,7 @@ CATALOG: list[ProviderEntry] = [
         key="fal",
         label="fal.ai",
         provider="fal",
-        beginner="海外平台，出图出视频都快。注意：这家没有免生成的校验接口。",
+        beginner="海外平台，用 fal 自有协议，只能连 fal.ai。出图出视频都快；这家没有免生成的只读校验接口，密钥只能靠真实生成来验。",
         kinds=["image", "video"],
         key_fields=[KeyField(env="FAL_KEY", label="API Key", placeholder="key-id:key-secret")],
         endpoints={},
@@ -254,11 +272,11 @@ CATALOG: list[ProviderEntry] = [
         key="zhipu",
         label="智谱 BigModel（CogView / CogVideoX）",
         provider="openai",
-        beginner="智谱开放平台。图像用 CogView，视频用 CogVideoX。有免费模型可试。",
+        beginner="智谱开放平台，走的是 OpenAI 协议、但地址是智谱自己的（点这张会自动预填）。CogView 出图、CogVideoX 出视频，有免费模型可试。",
         kinds=["image", "video"],
         key_fields=[
             KeyField(
-                env="MY_API_KEY",
+                env="ZHIPU_API_KEY",
                 label="API Key",
                 placeholder="粘贴你的 API Key",
                 hint="open.bigmodel.cn → 控制台 → API Keys",
@@ -305,14 +323,15 @@ CATALOG: list[ProviderEntry] = [
     ),
     ProviderEntry(
         key="generic_http",
-        label="自定义接口（高级）",
+        label="自定义接口（其他协议）",
         provider="generic_http",
         beginner=(
-            "上面没有你用平台时选这个。需要自己填接口地址和返回结构，"
-            "具体字段说明见 references/providers.md。"
+            "上面的卡片都对不上时才用：接口地址、请求参数和返回结构（高级选项里的 JSON）"
+            "全部得自己填。它没有内置协议，也没有只读的密钥校验和模型列表，"
+            "具体字段见 references/providers.md。能选上面的卡就别选它。"
         ),
         kinds=["image", "video"],
-        advanced=True,
+        needs_options=True,
         key_fields=[
             KeyField(
                 env="MY_API_KEY",
@@ -405,6 +424,45 @@ def derive_list_url(endpoint: str) -> str:
     return ""
 
 
+def rebase_readonly_url(declared: str, user_endpoint: str) -> str:
+    """把目录里写死的只读地址（密钥校验、模型列表）搬到用户自己填的域名上。
+
+    目录里的 ``auth_check.url`` / ``list_models.url`` 都是**官方**域名。用中转站
+    或自建网关的用户填的是自己的地址、密钥也是那边发的 —— 拿这把密钥去敲
+    ``api.openai.com`` 必然 401，而这个 401 会顺着"轻量预检不过就不真生成"
+    一路把「真实测试」掐死，用户永远看不到真正的失败原因。
+
+    两条路：
+
+      * ``…/models`` 这种 OpenAI 兼容列表端点，用 :func:`derive_list_url` 从
+        用户填的生成地址推 —— 中转站把接口挂在子路径下时也对得上。
+      * 其余（方舟的任务列表、百炼的 tasks）只换域名、保留路径与查询串。
+        中转站基本都是反代官方路径，多数能对上；对不上就是 404，探测会如实
+        标"未能确认密钥"（WARN，不拦真实测试），比一个必然误判的 401 好得多。
+
+    同源、或任一地址不可解析时原样返回 ``declared``，官方用户行为不变。
+    """
+    try:
+        declared_parts = urlparse(str(declared or ""))
+        user_parts = urlparse(str(user_endpoint or ""))
+    except ValueError:
+        return str(declared or "")
+    if not (declared_parts.scheme and declared_parts.netloc):
+        return str(declared or "")
+    if not (user_parts.scheme and user_parts.netloc):
+        return str(declared or "")
+    if (user_parts.hostname or "").lower() == (declared_parts.hostname or "").lower():
+        return str(declared)
+
+    if declared_parts.path.rstrip("/").endswith("/models"):
+        derived = derive_list_url(user_endpoint)
+        if derived:
+            return derived
+
+    query = f"?{declared_parts.query}" if declared_parts.query else ""
+    return f"{user_parts.scheme}://{user_parts.netloc}{declared_parts.path or '/'}{query}"
+
+
 def can_list_models_for(
     entry: ProviderEntry | None, endpoints: dict[str, str] | None = None
 ) -> bool:
@@ -474,7 +532,7 @@ def as_dict() -> list[dict]:
             "provider": e.provider,
             "beginner": e.beginner,
             "kinds": e.kinds,
-            "advanced": e.advanced,
+            "needs_options": e.needs_options,
             "keyless": e.keyless,
             "signup": e.signup,
             "key_fields": [

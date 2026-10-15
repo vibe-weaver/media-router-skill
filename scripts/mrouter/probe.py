@@ -126,6 +126,78 @@ def _auth_headers(target: ProbeTarget, key: str, entry: catalog.ProviderEntry) -
     return {"Authorization": f"Bearer {key}"}
 
 
+def user_endpoint(target: ProbeTarget, kind: str) -> str:
+    """这个类目实际会用的接口地址；本类目没填就退回任意一个填了的类目。"""
+    value = str(target.endpoints.get(kind) or "").strip()
+    if value:
+        return value
+    return next(
+        (str(v).strip() for v in target.endpoints.values() if str(v).strip()), ""
+    )
+
+
+def custom_endpoints(
+    target: ProbeTarget, entry: catalog.ProviderEntry | None
+) -> dict[str, str]:
+    """用户**真正改过**的接口地址 —— 即与目录默认值不同的那些。
+
+    配置加载会把厂商省略的类目按目录默认值补回 ``target.endpoints``（config 里
+    那段 setdefault），所以"字典里有值"并不等于"用户填过"：纯官方用户和只改了
+    一个类目的中转用户，两边的 endpoints 长得一模一样。只有和目录默认值比对，
+    才能把"用户把这个厂商指向了别处"认出来。
+    """
+    defaults = (entry.endpoints or {}) if entry is not None else {}
+    custom: dict[str, str] = {}
+    for kind, raw in (target.endpoints or {}).items():
+        value = str(raw or "").strip()
+        if value and value != str(defaults.get(str(kind)) or "").strip():
+            custom[str(kind)] = value
+    return custom
+
+
+def readonly_endpoint(
+    target: ProbeTarget, entry: catalog.ProviderEntry | None, kind: str
+) -> str:
+    """定位只读端点（密钥校验 / 模型列表）时，该以哪个接口地址为准。
+
+    本类目被用户改过就用本类目；本类目还停在目录默认值、而**别的**类目被改过，
+    就跟着那个走 —— 用户把一个厂商指向中转站/网关，是整套接口都过去了，不该因为
+    这一类目没单独填就又敲回官方域名（必然 401，而且会掐掉真实测试）。
+    """
+    custom = custom_endpoints(target, entry)
+    if kind in custom:
+        return custom[kind]
+    if custom:
+        return next(iter(custom.values()))
+    return user_endpoint(target, kind)
+
+
+def readonly_url(
+    entry: catalog.ProviderEntry, target: ProbeTarget, kind: str
+) -> tuple[str, str]:
+    """这次探测该去请求哪个只读地址，以及它是怎么定下来的。
+
+    目录里写死的校验地址是**官方**域名，可用户填的接口地址可能是中转站或
+    自建网关 —— 密钥也是那边发的，拿去敲官方域名必然 401。所以只要用户把地址
+    指向了别处，就以它为准（见 catalog.rebase_readonly_url）。
+
+    返回 (url, note)。note 非空表示地址是按用户填的接口地址改过的，
+    要显示出来 —— 否则用户看到一个 401，根本不知道我们敲的是哪个域名。
+    """
+    declared = str((entry.auth_check or {}).get("url") or "")
+    if not declared:
+        return "", ""
+
+    endpoint = readonly_endpoint(target, entry, kind)
+    if not endpoint:
+        return declared, ""
+
+    rebased = catalog.rebase_readonly_url(declared, endpoint)
+    if rebased == declared:
+        return declared, ""
+    return rebased, "按你填的接口地址"
+
+
 # ---------------------------------------------------------------- 轻量探测
 
 
@@ -148,7 +220,12 @@ def _check_reachable(url: str, timeout: float) -> Check:
 
 
 def _check_auth(
-    target: ProbeTarget, entry: catalog.ProviderEntry, key: str, timeout: float
+    target: ProbeTarget,
+    entry: catalog.ProviderEntry,
+    key: str,
+    timeout: float,
+    url: str = "",
+    url_note: str = "",
 ) -> tuple[Check, list[str]]:
     if entry.keyless:
         return Check("密钥校验", SKIP, "该厂商无需密钥"), []
@@ -168,7 +245,12 @@ def _check_auth(
         hint = entry.key_fields[0].hint if entry.key_fields else ""
         return Check("密钥校验", FAIL, f"还没填密钥。{hint}"), []
 
-    url = entry.auth_check["url"]
+    url = url or str(entry.auth_check.get("url") or "")
+    if not url:
+        return Check("密钥校验", WARN, "该平台没有可用的校验地址"), []
+    #: 地址被改写过时必须说出来。中转站用户看到 401，第一反应是"密钥错了"，
+    #: 而真正的原因可能是我们敲了官方域名 —— 不摆出地址就没法自查。
+    where = f"（校验地址：{url}）" if url_note else ""
     try:
         headers = _auth_headers(target, key, entry)
     except HttpError as exc:
@@ -179,17 +261,25 @@ def _check_auth(
     except HttpError as exc:
         status = exc.status
         if status in (401, 403):
-            return Check("密钥校验", FAIL, f"密钥无效或被拒绝（HTTP {status}）"), []
+            return Check(
+                "密钥校验", FAIL, f"密钥无效或被拒绝（HTTP {status}）{where}"
+            ), []
         if status == 404:
             return (
-                Check("密钥校验", WARN, "校验端点返回 404（可能是区域不同），未能确认密钥"),
+                Check(
+                    "密钥校验",
+                    WARN,
+                    f"校验端点返回 404，未能确认密钥{where}"
+                    + ("。这个地址是从你填的接口地址推出来的，该平台可能不遵循同样的规律"
+                       if url_note else "（可能是区域不同）"),
+                ),
                 [],
             )
         if status == 429:
-            return Check("密钥校验", WARN, "密钥看起来有效，但当前被限流（HTTP 429）"), []
+            return Check("密钥校验", WARN, f"密钥看起来有效，但当前被限流（HTTP 429）{where}"), []
         if status:
-            return Check("密钥校验", WARN, f"校验请求返回 HTTP {status}，未能确认密钥"), []
-        return Check("密钥校验", FAIL, f"校验请求失败：{exc}"), []
+            return Check("密钥校验", WARN, f"校验请求返回 HTTP {status}，未能确认密钥{where}"), []
+        return Check("密钥校验", FAIL, f"校验请求失败：{exc}{where}"), []
 
     try:
         payload = resp.json()
@@ -201,7 +291,7 @@ def _check_auth(
             Check(
                 "密钥校验",
                 WARN,
-                f"校验端点有响应但不是 JSON，未能确认密钥（{exc}）",
+                f"校验端点有响应但不是 JSON，未能确认密钥（{exc}）{where}",
             ),
             [],
         )
@@ -260,7 +350,11 @@ def probe_target(
         )
     )
 
-    probe_url = (entry.auth_check or {}).get("url") or endpoint
+    #: 可达性检查与密钥校验用的是两个地址：前者退到生成地址也有意义（能连上就说明
+    #: 网络和域名没问题），后者必须用只读校验地址 —— 拿生成地址去 GET 只会得到
+    #: 405，然后被当成"未能确认密钥"。
+    auth_url, auth_note = readonly_url(entry, target, kind)
+    probe_url = auth_url or endpoint
     if entry.keyless:
         checks.append(Check("接口可达", SKIP, "使用内置工具，不访问外部接口"))
     elif not probe_url:
@@ -270,7 +364,9 @@ def probe_target(
     else:
         checks.append(_check_reachable(probe_url, PROBE_TIMEOUT))
 
-    auth_check, models = _check_auth(target, entry, key, PROBE_TIMEOUT)
+    auth_check, models = _check_auth(
+        target, entry, key, PROBE_TIMEOUT, url=auth_url, url_note=auth_note
+    )
     checks.append(auth_check)
 
     if key and source:
@@ -567,10 +663,7 @@ def fetch_models(
             }
             source = "auth_check"
         else:
-            endpoint = str(target.endpoints.get(kind) or "").strip()
-            if not endpoint:
-                endpoint = next(iter(target.endpoints.values()), "") if target.endpoints else ""
-            derived = catalog.derive_list_url(endpoint)
+            derived = catalog.derive_list_url(readonly_endpoint(target, entry, kind))
             if derived:
                 spec = {
                     "url": derived,
@@ -583,6 +676,15 @@ def fetch_models(
                     ),
                 }
                 source = "derived"
+
+    # 目录 / 旧式校验端点里写死的是**官方**域名。中转站用户的密钥在官方那边
+    # 不认，拿官方地址拉列表必然 401 —— 和密钥校验是同一个坑，同样搬过去。
+    if spec.get("url") and source != "derived":
+        endpoint = readonly_endpoint(target, entry, kind)
+        if endpoint:
+            rebased = catalog.rebase_readonly_url(str(spec["url"]), endpoint)
+            if rebased != spec["url"]:
+                spec = {**spec, "url": rebased}
 
     if not spec.get("url"):
         return fail(

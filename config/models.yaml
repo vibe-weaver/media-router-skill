@@ -89,7 +89,7 @@ image:
 #       weight: 50
 #       enabled: true
 #       supports: [text2img]          # 需要图生图再加 img2img
-#       api_key_env: MY_API_KEY       # 密钥从哪个环境变量/密钥文件读
+#       api_key_env: ZHIPU_API_KEY    # 密钥从哪个环境变量/密钥文件读
 #       # endpoint: https://…         # 可选，非默认网关才需要
 #       # params:
 #       #   size: 1024x1024

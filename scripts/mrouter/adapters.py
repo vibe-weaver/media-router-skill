@@ -135,10 +135,13 @@ def _fetch_to_local(
 ) -> Path:
     """下载并纠正扩展名（以真实文件头为准）。"""
     default_ext = ".mp4" if kind == "video" else ".png"
-    if str(url).startswith("data:"):
+    text = str(url)
+    if text.startswith("data:"):
         # 有些平台直接把产物以内联 base64 返回。urllib 不认 data: scheme，
         # 交给 download 只会得到 "unknown url type: data"，所以这里单独处理。
-        return _write_b64_to_local(str(url), out_dir, stem, index, kind)
+        return _write_b64_to_local(text, out_dir, stem, index, kind)
+    if "://" not in text:
+        return _write_inline_b64(text, out_dir, stem, index, kind)
     ext = _ext_from_url(url, default_ext)
     dest = _unique_path(out_dir / f"{stem}_{index:02d}{ext}")
     download(url, dest, headers=headers, timeout=300.0)
@@ -151,18 +154,66 @@ def _fetch_to_local(
     return dest
 
 
-def _write_b64_to_local(
-    payload: str, out_dir: Path, stem: str, index: int, kind: str
+#: 裸 base64 的形状。64 字起步 —— 任何媒体文件编码后都远长于此，
+#: 而 task_id、model 名这类普通字符串几乎不会这么长，避免误判。
+_B64_BODY = re.compile(r"^[A-Za-z0-9+/_-]{64,}={0,2}$")
+_B64_TO_STD = str.maketrans("-_", "+/")
+
+
+def _b64_decode_lenient(payload: str) -> bytes | None:
+    """解 base64，容忍缺 padding、夹带换行、以及 urlsafe 字母表。解不出返回 None。"""
+    body = re.sub(r"\s+", "", str(payload)).translate(_B64_TO_STD).rstrip("=")
+    body += "=" * (-len(body) % 4)
+    try:
+        return base64.b64decode(body, validate=True)
+    except ValueError:  # binascii.Error 是它的子类
+        return None
+
+
+def _write_media_bytes(
+    data: bytes, ext: str, out_dir: Path, stem: str, index: int
 ) -> Path:
-    raw = payload
-    if raw.startswith("data:"):
-        raw = raw.split(",", 1)[-1]
-    data = base64.b64decode(raw)
-    ext = sniff_extension(data[:32]) or (".mp4" if kind == "video" else ".png")
     dest = _unique_path(out_dir / f"{stem}_{index:02d}{ext}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
     return dest
+
+
+def _write_inline_b64(
+    payload: str, out_dir: Path, stem: str, index: int, kind: str
+) -> Path:
+    """产物字段里放的是**不带 data: 前缀**的裸 base64。
+
+    不少中转站把上游的 ``b64_json`` 原样塞进 ``url`` 字段，交给 download()
+    只会得到 ``unknown url type: 'iVBOR…'`` —— 请求全对、图真的回来了，
+    偏偏最后一步落盘失败，而那条报错完全看不出跟 base64 有关。
+
+    解得出、且文件头认得出是图片/视频，才当产物收下。否则如实报错：
+    更可能是 ``result_url_field`` / ``result_path`` 取错了字段。
+    """
+    data = _b64_decode_lenient(payload) if _B64_BODY.match(re.sub(r"\s+", "", payload)) else None
+    ext = sniff_extension((data or b"")[:32])
+    if data is None or ext is None:
+        raise HttpError(
+            "接口返回的产物字段既不是下载地址，也解不出可识别的图片/视频文件头"
+            f"（内容开头：{str(payload)[:40]}）。\n"
+            "多半是 result_url_field / result_path 取错了字段，"
+            "把真正的下载地址或 base64 字段名对上即可。"
+        )
+    return _write_media_bytes(data, ext, out_dir, stem, index)
+
+
+def _write_b64_to_local(
+    payload: str, out_dir: Path, stem: str, index: int, kind: str
+) -> Path:
+    raw = str(payload)
+    if raw.startswith("data:"):
+        raw = raw.split(",", 1)[-1]
+    data = _b64_decode_lenient(raw)
+    if data is None:
+        raise HttpError(f"内联 base64 产物解码失败（内容开头：{raw[:40]}）")
+    ext = sniff_extension(data[:32]) or (".mp4" if kind == "video" else ".png")
+    return _write_media_bytes(data, ext, out_dir, stem, index)
 
 
 def _dig(data: Any, path: str | None, default: Any = None) -> Any:
@@ -266,14 +317,16 @@ def _collect_urls_from_items(
     return urls
 
 
-_URL_SHAPED = re.compile(r"^(?:https?://|data:image/)", re.I)
+#: 内联产物只认 ``data:`` 整体，不限图片 —— 平台照样可能内联返回
+#: ``data:video/mp4;base64,…``，而 _fetch_to_local 对任意 data: URI 都能落盘。
+_URL_SHAPED = re.compile(r"^(?:https?://|data:)", re.I)
 
 
 def _find_urls_deep(node: Any, limit: int = 8) -> list[str]:
     """在响应里递归找"长得像地址"的字符串。
 
     给"只填了一个接口地址、没配 result_path"的用户兜底：只要响应里有一个
-    形如 http(s)://… 或 data:image/… 的字段就取它。
+    形如 http(s)://… 或 data:… 的字段就取它。
 
     **只认地址形状的字符串**，不然会把 task_id、status 这类普通字符串也当成产物。
     """
@@ -1387,12 +1440,13 @@ def _generic_http_help(spec: ModelSpec, missing: str) -> str:
         "最小可用示例：\n"
         "  options:\n"
         "    auth: {type: bearer}                 # 密钥怎么带：bearer | key | header | query | none\n"
-        '    body: {prompt: "{{prompt}}", model: "{{model}}"}\n'
+        "    submit:\n"
+        '      body: {prompt: "{{prompt}}", model: "{{model}}"}\n'
         "    result_path: data.images             # 从响应里找产物的路径（点号分隔）\n"
         "    result_url_field: url                # 产物是对象数组时取哪个字段\n"
         "  再加上提交地址：在模型条目里写 endpoint，或在 options.submit.url 里写。\n"
         "  异步接口（先拿 task_id 再轮询）还要：\n"
-        "    submit: {task_id_path: data.task_id}\n"
+        "    submit: {task_id_path: data.task_id}   # 并进上面那个 submit，不是再来一个\n"
         '    poll: {url: "https://…/{{task_id}}", status_path: data.status, result_path: data.result}\n'
         "字段对照见 references/providers.md 的 generic_http 一节。"
     )

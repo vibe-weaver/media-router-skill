@@ -87,13 +87,13 @@
 | 火山方舟（即梦 / Seedance） | `volcengine` | ✓ | ✓ | `ARK_API_KEY` |
 | 阿里云百炼（通义万相） | `dashscope` | ✓ | ✓ | `DASHSCOPE_API_KEY` |
 | 可灵（快手） | `kling` | ✓ | ✓ | AK:SK 一对 |
-| OpenAI 及兼容网关 | `openai` | ✓ | — | `OPENAI_API_KEY` |
+| OpenAI 及兼容网关 | `openai` | ✓ | ✓ | `OPENAI_API_KEY` |
 | 硅基流动 SiliconFlow | `openai` | ✓ | — | `SILICONFLOW_API_KEY` |
 | Replicate | `replicate` | ✓ | ✓ | `REPLICATE_API_TOKEN` |
 | fal.ai | `fal` | ✓ | ✓ | `FAL_KEY` |
-| 智谱 BigModel（CogView / CogVideoX） | `openai` | ✓ | ✓ | `MY_API_KEY` |
+| 智谱 BigModel（CogView / CogVideoX） | `openai` | ✓ | ✓ | `ZHIPU_API_KEY` |
 
-另有两条特殊条目：**内置工具兜底**（`native`，无需密钥）和**自定义接口**（`generic_http`，高级）。
+另有两条特殊条目：**内置工具兜底**（`native`，无需密钥）和**自定义接口（其他协议）**（`generic_http`，可接任意 REST 接口，请求与返回结构都得自己写进 `options`）。
 
 出厂配置的图片池和视频池里各带一条 `native` 兜底（`builtin-imagen` / `builtin-video`），priority 填的是
 最大值，所以你加的第三方模型永远排在它们前面；只有真模型全都不可用时才轮到它们 —— 这就是
