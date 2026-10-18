@@ -1,7 +1,7 @@
 {
   "id": "media-router-skill",
   "name": "图片/视频生成调度",
-  "version": "v1.0.0",
+  "version": "v1.1.0",
   "description": "给文本模型补上出图、出视频的能力，多模型池调度，失败自动降级和熔断，零依赖纯标准库",
   "author": { "name": "vibe-weaver", "url": "https://github.com/vibe-weaver/" },
   "license": "MIT",
