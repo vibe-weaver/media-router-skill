@@ -315,6 +315,11 @@ def check_page_js(page: Any) -> None:
         "页面看不到当前是 priority_then_weight / weight_only / fallback_chain",
     )
     check(
+        "策略下拉带动态解释",
+        'id="strategy-hint"' in str(page),
+        "用户切换策略时看不到三种策略的完整区别",
+    )
+    check(
         "页面有刷新按钮",
         'id="btn-refresh"' in str(page),
         "外部改配置后页面没有刷新入口",

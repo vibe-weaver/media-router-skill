@@ -24,12 +24,27 @@ function extract(name) {
   throw new Error("函数括号不配对：" + name);
 }
 
+function extractConst(name) {
+  const start = HTML.indexOf("const " + name + " = {");
+  if (start < 0) throw new Error("找不到常量 " + name);
+  let i = HTML.indexOf("{", start);
+  let depth = 0;
+  for (; i < HTML.length; i++) {
+    if (HTML[i] === "{") depth++;
+    else if (HTML[i] === "}") {
+      depth--;
+      if (depth === 0) return HTML.slice(start, i + 1) + ";";
+    }
+  }
+  throw new Error("常量括号不配对：" + name);
+}
+
 const FUNCS = [
   "esc", "kindName", "updateKindCounts", "renderModelGroups",
   "strategyOf", "routingInfo", "shareText", "metricOf", "tierHeader",
   "kindSummaryHtml", "renderProbability", "renderModelCard", "renderModels",
 ];
-const SRC = FUNCS.map(extract).join("\n");
+const SRC = extractConst("STRATEGY_HELP") + "\n" + FUNCS.map(extract).join("\n");
 
 function M(id, extra) {
   return Object.assign({
@@ -75,6 +90,7 @@ function run(models, strategies) {
       video: els["model-list-video"].innerHTML,
       summary: els["prob-summary"].innerHTML,
       strategy: els["strategy-select"].value,
+      hint: els["strategy-hint"].textContent,
       count: els["model-count"].textContent,
       info: routingInfo("image"),
     };
@@ -116,6 +132,7 @@ ok(cardIn(out.image, "base-model").includes("备用档") && !cardIn(out.image, "
 ok(!out.image.includes("pbar"), "模型卡不再画重复占比条");
 ok(cardIn(out.image, "builtin-imagen").includes("最后兜底"), "native 标注最后兜底");
 ok(out.strategy === "priority_then_weight", "策略下拉显示「按优先级」");
+ok(out.hint.includes("低档仅作备用"), "按优先级下方有完整解释");
 ok(out.count === "3 个模型", "当前页模型计数正确");
 
 // 2. 缺 Key / 熔断
@@ -150,8 +167,10 @@ ok(out.info.poolEmpty === true && out.summary.includes("没有可用的真实模
 // 4. 策略下拉
 out = run({image: [M("a")], video: []}, {image: "weight_only", video: "fallback_chain"});
 ok(out.strategy === "weight_only", "weight_only 策略下拉值");
+ok(out.hint.includes("忽略优先级"), "全局权重下方有完整解释");
 out = run({image: [M("a")], video: []}, {image: "fallback_chain", video: "weight_only"});
 ok(out.strategy === "fallback_chain", "fallback_chain 策略下拉值");
+ok(out.hint.includes("不随机") && out.hint.includes("按顺序降级"), "严格顺位下方有完整解释");
 
 // 5. P2 计数：停用模型要区分「启用 / 共」
 out = run({image: [M("on"), M("off", {enabled: false})], video: []});

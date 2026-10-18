@@ -39,6 +39,9 @@ check(PAGE.count("alert(") <= 1, "没有阻塞式 alert 调用（注释除外）
 # 页面结构：分页、策略、路由摘要、表单固定类型
 check('id="kind-tabs"' in PAGE, "存在图像/视频分页容器")
 check('id="strategy-select"' in PAGE, "存在当前策略下拉")
+check('id="strategy-hint"' in PAGE, "存在策略动态解释")
+check("同档加权" in PAGE and "忽略优先级" in PAGE and "按序不随机" in PAGE,
+      "策略选项自带短说明")
 check('id="btn-refresh"' in PAGE, "存在刷新按钮")
 check('class="model-head"' in PAGE, "页签与添加按钮在同一页头")
 check('class="routing-bar"' in PAGE and 'id="prob-summary"' in PAGE, "存在路由摘要条")

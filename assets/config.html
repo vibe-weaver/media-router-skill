@@ -190,6 +190,8 @@ details.adv summary .must{
   border-radius:999px; padding:3px 8px; cursor:pointer}
 .strategy-select:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
 .strategy-select:disabled{opacity:.6; cursor:not-allowed}
+.strategy-hint{flex-basis:100%; margin-top:2px; color:var(--muted); font-size:12px; line-height:1.5}
+.strategy-hint:empty{display:none}
 /* 优先级分组标题：用 6px 小圆点表达首选/备用/兜底，避免多种彩色徽标 */
 .tier-h{display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin:16px 0 5px}
 .mlist .tier-h:first-child{margin-top:4px}
@@ -407,12 +409,14 @@ details.pathbar .paths{
 
   <div class="routing-bar" id="routing-bar"
     title="priority_then_weight：只有最低优先级档参与首选，同档按权重分流；备用档在前序档位全部不可用时才启用。weight_only 忽略优先级按全局权重分流；fallback_chain 按优先级和权重严格排序。">
-    <select id="strategy-select" class="strategy-select" aria-label="当前路由策略" title="当前策略">
-      <option value="priority_then_weight">按优先级</option>
-      <option value="weight_only">全局权重</option>
-      <option value="fallback_chain">严格顺位</option>
+    <select id="strategy-select" class="strategy-select" aria-label="当前路由策略"
+      aria-describedby="strategy-hint" title="当前策略">
+      <option value="priority_then_weight">按优先级（同档加权）</option>
+      <option value="weight_only">全局权重（忽略优先级）</option>
+      <option value="fallback_chain">严格顺位（按序不随机）</option>
     </select>
     <div id="prob-summary" data-page-node-id="SYvV2jyl43sSDY3y7uvpB8"></div>
+    <div id="strategy-hint" class="strategy-hint" aria-live="polite"></div>
   </div>
 
   <div id="model-list" data-page-node-id="8PHrPQ1HIUr6JH6kjKhGsq"></div>
@@ -901,6 +905,12 @@ function strategyOf(kind){
   return (s==="weight_only"||s==="fallback_chain") ? s : "priority_then_weight";
 }
 
+const STRATEGY_HELP = {
+  priority_then_weight: "按优先级：只在最低优先级档内按权重随机，低档仅作备用。",
+  weight_only: "全局权重：忽略优先级，所有可用模型按权重一起随机。",
+  fallback_chain: "严格顺位：按优先级和权重固定排序，不随机；失败时按顺序降级。",
+};
+
 function routingInfo(kind){
   const strategy = strategyOf(kind);
   const enabled = (state.models[kind]||[]).filter(m=>m.enabled);
@@ -1063,13 +1073,15 @@ function renderProbability(){
   const box = el("prob-summary");
   const kind = pick.activeKind;
   box.innerHTML = kind ? kindSummaryHtml(kind) : "";
+  const s = kind ? strategyOf(kind) : "priority_then_weight";
   const select = el("strategy-select");
   if(select){
-    const s = kind ? strategyOf(kind) : "priority_then_weight";
     select.value = s;
     select.title = "当前策略："+s;
     select.disabled = !kind;
   }
+  const hint = el("strategy-hint");
+  if(hint) hint.textContent = kind ? (STRATEGY_HELP[s] || "") : "";
 }
 
 function renderModelCard(m, info){
@@ -1649,6 +1661,8 @@ el("strategy-select").addEventListener("change", () => guarded("修改策略", a
   const sel = el("strategy-select");
   const kind = pick.activeKind;
   const strategy = sel.value;
+  const hint = el("strategy-hint");
+  if(hint) hint.textContent = STRATEGY_HELP[strategy] || "";
   const label = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : strategy;
   try{
     await api("/api/strategy", {method:"POST", body:JSON.stringify({kind:kind, strategy:strategy})});
