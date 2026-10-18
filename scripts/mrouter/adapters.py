@@ -559,8 +559,10 @@ def gen_native(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) ->
             "tool": tool,
             "arguments": arguments,
             "note": (
-                f"模型 {spec.id} 走内置工具通道。请用 ToolSearch 查找 {tool}，"
-                f"再用 DeferExecuteTool 以上述 arguments 调用，拿到本地文件路径后继续原任务。"
+                f"模型 {spec.id} 走内置工具通道，没有生成任何文件。"
+                f"如果当前环境有内置的{'出图' if req.kind == 'image' else '出视频'}工具，"
+                f"直接用上述 arguments 调用（工具名可能是 {tool}）；"
+                f"如果没有，不要猜测工具名，直接告诉用户需要在配置页添加一个真实的第三方模型。"
             ),
         },
     )

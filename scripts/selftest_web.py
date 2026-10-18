@@ -298,6 +298,27 @@ def check_page_js(page: Any) -> None:
         str(page).count("alert(") <= 1,
         f"页面里还有 {str(page).count('alert(')} 处 alert(",
     )
+    check(
+        "删除厂商用页面内确认而不是原生 confirm",
+        "if(!confirm(" not in str(page) and "await uiConfirm(" in str(page),
+        "页面里还有阻塞式 confirm()，部分环境会点不动",
+    )
+    check(
+        "切换模型页前会确认未保存表单",
+        "async function setActiveKind" in str(page)
+        and "当前有未保存的模型表单" in str(page),
+        "切换图像/视频页会静默丢弃表单",
+    )
+    check(
+        "路由摘要显示当前策略",
+        'id="strategy-select"' in str(page),
+        "页面看不到当前是 priority_then_weight / weight_only / fallback_chain",
+    )
+    check(
+        "页面有刷新按钮",
+        'id="btn-refresh"' in str(page),
+        "外部改配置后页面没有刷新入口",
+    )
 
     # A2：可点选的卡片（div 充当按钮）必须键盘可达
     check(
@@ -306,9 +327,16 @@ def check_page_js(page: Any) -> None:
         "卡片缺少 role/tabindex，键盘走不到",
     )
     check(
-        "卡片同步 aria-pressed 选中态",
-        "aria-pressed" in str(page) and 'setAttribute("aria-pressed"' in str(page),
-        "读屏读不出选中状态",
+        "厂商卡片同步 aria-pressed 选中态",
+        "aria-pressed" in str(page)
+        and "function selectProvider(" in str(page)
+        and "renderProviderGrid()" in str(page),
+        "读屏读不出厂商卡片选中状态",
+    )
+    check(
+        "模型类型页签同步 aria-selected",
+        'role="tab"' in str(page) and 'setAttribute("aria-selected"' in str(page),
+        "读屏读不出当前是图像页还是视频页",
     )
     check(
         "卡片接了回车/空格键盘事件",
@@ -1054,6 +1082,21 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
     # ---------------------------------------------------------- 模型
     section("模型配置")
 
+    # 基础层有模型、叠加层还没有任何模型时，改策略不能把 strategy 节点 prune 掉
+    status, res = client.call(
+        "POST", "/api/strategy", {"kind": "video", "strategy": "weight_only"}
+    )
+    check("base-only 池改策略成功", status == 200 and res.get("ok"), str(res))
+    status, payload = client.call("GET", "/api/bootstrap")
+    check(
+        "base-only 池策略已生效",
+        payload.get("strategies", {}).get("video") == "weight_only",
+        str(payload.get("strategies")),
+    )
+    client.call(
+        "POST", "/api/strategy", {"kind": "video", "strategy": "priority_then_weight"}
+    )
+
     status, res = client.call(
         "POST",
         "/api/model",
@@ -1083,6 +1126,35 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
     check("视频模型带上了图生视频能力", "img2video" in video_model.get("supports", []), str(video_model))
     check("模型带上了厂商中文名", video_model.get("vendor_label") == "火山方舟（即梦 / Seedance）", str(video_model.get("vendor_label")))
     check("模型带上了权重与优先级", video_model.get("weight") == 70 and video_model.get("priority") == 1, str(video_model))
+    check(
+        "bootstrap 带密钥就绪状态",
+        "api_key_ready" in video_model and "needs_api_key" in video_model,
+        str(video_model),
+    )
+    check(
+        "bootstrap 带熔断状态",
+        "cooling" in video_model and "cooldown_remaining_seconds" in video_model,
+        str(video_model),
+    )
+
+    # 策略修改：页面下拉 -> /api/strategy -> 叠加层
+    status, res = client.call(
+        "POST", "/api/strategy", {"kind": "image", "strategy": "weight_only"}
+    )
+    check("修改图像策略成功", status == 200 and res.get("ok"), str(res))
+    status, payload = client.call("GET", "/api/bootstrap")
+    check(
+        "bootstrap 里图像策略已更新",
+        payload.get("strategies", {}).get("image") == "weight_only",
+        str(payload.get("strategies")),
+    )
+    status, res = client.call(
+        "POST", "/api/strategy", {"kind": "image", "strategy": "bogus"}
+    )
+    check("非法策略被拒绝", status == 400, str(res))
+    client.call(
+        "POST", "/api/strategy", {"kind": "image", "strategy": "priority_then_weight"}
+    )
 
     status, res = client.call(
         "POST",

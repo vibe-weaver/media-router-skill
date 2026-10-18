@@ -197,7 +197,7 @@ def cmd_providers(args: argparse.Namespace) -> int:
         "fal": "fal.ai 队列接口",
         "generic_http": "完全配置驱动：填 YAML 即可接任意 REST 接口",
     }
-    _emit({"status": "ok", "providers": table}, args.pretty or True)
+    _emit({"status": "ok", "providers": table}, args.pretty)
     return EXIT_OK
 
 
@@ -228,7 +228,7 @@ def cmd_list(args: argparse.Namespace) -> int:
             "pools": [_pool_report(cfg, health, kind) for kind in kinds],
             "warnings": cfg.warnings,
         },
-        args.pretty or True,
+        args.pretty,
     )
     return EXIT_OK
 
@@ -281,7 +281,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             "skipped_missing_key": skipped,
             "warnings": cfg.warnings,
         },
-        args.pretty or True,
+        args.pretty,
     )
     return EXIT_OK
 
@@ -322,6 +322,25 @@ def cmd_generate(args: argparse.Namespace) -> int:
         notes_out.append(
             "以下候选因未配置密钥被跳过（不占用重试次数）：" + "、".join(skipped_candidates)
         )
+
+    if not attempts:
+        # 所有候选都因缺 Key / 被停用被跳过。原来的报错是“所有候选模型都失败了”，
+        # 但 fallback_trail 是空的，agent 会误以为接口挂了。这里直接给配置类错误，
+        # 让“快速路径”不用先跑 resolve 也能正确判断。
+        _emit(
+            {
+                "status": "error",
+                "kind": args.kind,
+                "error": "没有可尝试的模型：候选都被跳过或未启用",
+                "skipped_missing_key": skipped_candidates,
+                "routing": notes,
+                "notes": notes_out,
+                "elapsed_ms": int((time.time() - started) * 1000),
+                "hint": "缺 Key 请运行 web 配置或读 references/setup.md；再用 list 确认模型是否 enabled。",
+            },
+            args.pretty,
+        )
+        return EXIT_ERROR
 
     for spec in attempts:
         attempt_started = time.time()
@@ -481,7 +500,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     snapshot = health.snapshot([spec.id])[spec.id]
     _emit(
         {"status": "ok", "model": spec.id, **outcome, "health": snapshot},
-        args.pretty or True,
+        args.pretty,
     )
     return EXIT_OK
 
@@ -503,7 +522,7 @@ def cmd_health(args: argparse.Namespace) -> int:
             "models": health.snapshot(ids),
             **({"reset": args.model or "all"} if args.reset else {}),
         },
-        args.pretty or True,
+        args.pretty,
     )
     return EXIT_OK
 

@@ -322,6 +322,16 @@ class ConfigApi:
         result = store.save_with(lambda overlay: overlay.set_enabled(model_id, enabled))
         return {"ok": True, **result}
 
+    def strategy_save(
+        self, _query: dict[str, list[str]], body: dict[str, Any]
+    ) -> dict[str, Any]:
+        if store.readonly_reason():
+            raise ApiError(store.readonly_reason(), 409)
+        kind = str(body.get("kind") or "").strip()
+        strategy = str(body.get("strategy") or "").strip()
+        result = store.save_with(lambda overlay: overlay.set_strategy(kind, strategy))
+        return {"ok": True, **result}
+
     def model_test(
         self, _query: dict[str, list[str]], body: dict[str, Any]
     ) -> dict[str, Any]:
@@ -333,6 +343,8 @@ class ConfigApi:
         """
         cfg = self._config()
         entry, kind, model_name = self._resolve_model_for_test(body)
+        if str(entry.get("provider") or "") == "native":
+            raise ApiError("内置兜底模型不调用任何接口，无需测试；它也不能编辑，只能隐藏。")
         target = self._target_from_payload(
             {
                 "catalog_key": entry.get("catalog"),
@@ -529,6 +541,7 @@ ROUTES: dict[tuple[str, str], str] = {
     ("POST", "/api/models/bulk"): "models_bulk_add",
     ("DELETE", "/api/model"): "model_delete",
     ("POST", "/api/model/toggle"): "model_toggle",
+    ("POST", "/api/strategy"): "strategy_save",
     ("POST", "/api/model/test"): "model_test",
 }
 

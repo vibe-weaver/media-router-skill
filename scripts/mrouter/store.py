@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from . import catalog, config, miniyaml
+from . import catalog, config, health, miniyaml
 
 OVERLAY_NAMES = ("models.web.yaml", "models.web.yml", "models.web.json")
 OVERLAY_DEFAULT = "models.web.yaml"
@@ -556,9 +556,19 @@ class Overlay:
                 f"想恢复就在这里重新添加同 id 的厂商）。"
             )
         if dropped:
+            base_model_ids = {
+                str(item.get("id")) for _kind, item in self.base_models()
+            }
+            hidden = sorted(dropped & base_model_ids)
             message += (
-                f"，同时移除了引用它的 {len(dropped)} 个模型：" + "、".join(sorted(dropped))
+                f"，同时移除了引用它的 {len(dropped)} 个模型："
+                + "、".join(sorted(dropped))
             )
+            if hidden:
+                message += (
+                    "（其中 " + "、".join(hidden) + " 是手写层模型，"
+                    "只是隐藏，不会改你的文件）"
+                )
         return {
             "id": vendor_id,
             "removed_models": sorted(dropped),
@@ -586,6 +596,15 @@ class Overlay:
         located = self.locate_model(model_id)
         previous = self.find_model(model_id)
         previous_row = located[1] if located is not None else None
+
+        # 内置兜底条目（provider: native）是随 skill 出厂的能力，页面只允许
+        # 隐藏（走 set_enabled），不允许改名、改优先级、改能力或增删 ——
+        # 否则用户会把它改成 priority 1 或删掉，最后连兜底都没有了。
+        if previous_row is not None and str(previous_row.get("provider") or "") == "native":
+            raise config.ConfigError(
+                "内置兜底模型不能编辑：它不调用任何接口，只在真实模型都不可用时兜底。"
+                "不想让它参与调度，请用「隐藏」。"
+            )
 
         vendor_id = str(payload.get("vendor") or "").strip()
         if vendor_id:
@@ -728,6 +747,11 @@ class Overlay:
         if found is None:
             raise config.ConfigError(f"找不到模型：{model_id}")
         kind, item, _layer = found
+        if str(item.get("provider") or "") == "native":
+            raise config.ConfigError(
+                "内置兜底模型不能删除：它不调用任何接口，也不会产生费用。"
+                "不想让它参与调度，请用「隐藏」。"
+            )
         name = str(item.get("model") or model_id)
 
         # 叠加层里的条目直接摘掉
@@ -788,6 +812,30 @@ class Overlay:
             "id": model_id,
             "enabled": bool(enabled),
             "message": f"模型「{name}」已{'启用' if enabled else '停用'}",
+        }
+
+    def set_strategy(self, kind: str, strategy: str) -> dict[str, Any]:
+        """改某个模型池的路由策略，只写叠加层。"""
+        kind = str(kind or "").strip()
+        if kind not in ("image", "video"):
+            raise config.ConfigError("模型类目只能是 image（图像）或 video（视频）")
+        strategy = str(strategy or "").strip()
+        if strategy not in config.VALID_STRATEGIES:
+            raise config.ConfigError(
+                "strategy 只能是 " + "、".join(config.VALID_STRATEGIES)
+            )
+        self._ensure_pool(kind)
+        self.data[kind]["strategy"] = strategy
+        node = self.data[kind]
+        # 不要留下空的 models: []。_prune_empty_pools 会把这种节点整个删掉，
+        # 于是"基础层有模型、叠加层只改策略"的池子会静默丢掉刚写的策略。
+        if isinstance(node.get("models"), list) and not node["models"]:
+            node.pop("models", None)
+        label = "图像" if kind == "image" else "视频"
+        return {
+            "kind": kind,
+            "strategy": strategy,
+            "message": f"{label}模型策略已改为 {strategy}",
         }
 
     # ---------- 落盘 ----------
@@ -944,8 +992,9 @@ def bootstrap(host: str = "127.0.0.1") -> dict[str, Any]:
         )
 
     # 顶层再校验一遍，把"能读但有毛病"的问题也提前告诉用户
+    cfg: config.RouterConfig | None = None
     try:
-        config.load_config()
+        cfg = config.load_config()
     except config.ConfigError as exc:
         warnings.append(str(exc))
     except Exception as exc:  # noqa: BLE001
@@ -1006,10 +1055,50 @@ def bootstrap(host: str = "127.0.0.1") -> dict[str, Any]:
                 if isinstance(item, dict) and item.get("id")
             ]
 
+    # 给页面补上运行时的"能不能用"信息：缺 Key / 熔断中。
+    # 页面原来只看 enabled，用户会看到模型亮着、实际生成时却被跳过。
+    if cfg is not None:
+        specs = {m.id: m for pool in cfg.pools.values() for m in pool.models}
+        try:
+            snapshot = health.HealthStore(cfg.health_path).snapshot(list(specs))
+        except Exception:  # noqa: BLE001 - 状态文件坏了也不该让页面打不开
+            snapshot = {}
+        for bucket in models.values():
+            for view in bucket:
+                spec = specs.get(view["id"])
+                row = snapshot.get(view["id"]) or {}
+                keyless = bool(
+                    spec and spec.provider in ("native", "generic_http_nokey")
+                )
+                ready = True
+                if spec is not None and not keyless:
+                    try:
+                        ready = bool(cfg.resolve_api_key(spec)[0])
+                    except Exception:  # noqa: BLE001
+                        ready = False
+                view["needs_api_key"] = bool(spec is not None and not keyless)
+                view["api_key_ready"] = ready
+                view["cooling"] = bool(row.get("cooling"))
+                view["cooldown_remaining_seconds"] = float(
+                    row.get("cooldown_remaining_seconds") or 0.0
+                )
+
     kinds = list(models)
     for extra in ("image", "video"):
         if extra not in kinds:
             kinds.append(extra)
+
+    # 每个池子的路由策略。页面要靠它决定"固定分档"还是"全局权重"，不能靠猜。
+    # 非法值在这里就归一成默认策略，和 load_config 的运行时行为保持一致；
+    # 原始写法在 config 命令/页面的 warnings 里另有提示。
+    strategies = {}
+    for key, value in data.items():
+        if not isinstance(value, dict):
+            continue
+        if not (isinstance(value.get("models"), list) or "strategy" in value):
+            continue
+        raw = str(value.get("strategy") or "").strip()
+        strategies[key] = raw if raw in config.VALID_STRATEGIES else "priority_then_weight"
 
     # 引用了不存在的厂商的模型，等于运行时一定会失败，提前点出来
     for kind, bucket in models.items():
@@ -1032,6 +1121,7 @@ def bootstrap(host: str = "127.0.0.1") -> dict[str, Any]:
         "catalog": catalog.as_dict(),
         "vendors": vendors,
         "models": models,
+        "strategies": strategies,
         "kinds": kinds,
         "warnings": deduped,
         "readonly": readonly_reason(),

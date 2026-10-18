@@ -31,13 +31,14 @@
 不调任何 HTTP。返回一条"请你去调 ImageGen / VideoGen"的指令（`status: delegate`，退出码 3），
 由 agent 用它自己环境里的内置能力完成。
 
-适合当兜底：priority 填一个**最大**的数（如 9，数值越小越优先），保证它总排在真模型后面、
-没配 Key 时任务也不会彻底断掉。填 1 会反过来 —— 它会抢在真模型前面，每次生成都直接委托。
+适合当兜底：priority 填一个**很大**的数（出厂 1000000，数值越小越优先），保证它总排在真模型后面、
+没配 Key 时任务也不会彻底断掉。配置页面把它识别为「内置」条目，只允许隐藏，不允许编辑/删除 ——
+手改 `models.yaml` 把 priority 改小没有意义，实际生成时调度器仍会把它排到最后。
 
 ```yaml
 - id: builtin-imagen
   provider: native
-  priority: 9          # 数值大 = 最后才轮到
+  priority: 1000000   # 数值大 = 最后才轮到
   weight: 100
   enabled: true
   supports: [text2img, img2img]

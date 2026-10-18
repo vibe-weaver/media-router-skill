@@ -26,7 +26,7 @@
 `media-router` 用一个**你自己维护的多模型池**把这一步接上：按优先级分档、同档内按权重加权随机挑模型，
 失败自动降级到下一个候选，连续失败自动熔断，最后把**产物路径 + 文字描述**交回给文本模型，让原任务继续往下走。
 
-它是一份 **agent skill**：放进 skills 目录即可用，`SKILL.md` 给 agent 读，本文件给你读。
+它是一份 **agent skill**：把运行时目录放进 skills 目录即可用，`SKILL.md` 给 agent 读，本文件给你读。
 
 > **零依赖** — 只用 Python 3.8+ 标准库，不需要 `pip install` 任何东西。
 > **可移植** — 所有路径相对 skill 自身解析，放哪个 agent 的 skills 目录都能跑。
@@ -70,7 +70,7 @@
 | **多模型池** | 优先级分档 + 同档加权随机 | 想让 A 永远优先就分开档位；想 5:3 分摊流量就同档设 50:30 |
 | **自动降级** | 失败即换下一个候选 | 缺密钥的模型会被跳过，**且不占用重试次数** |
 | **自动熔断** | 连续失败进入冷却 | 冷却期内不再被选中，成功后计数清零；状态落在 `state/health.json` |
-| **永不卡死** | 出厂自带 `native` 兜底 | 图片 / 视频池各带一条 `builtin-imagen` / `builtin-video`（priority 9），真模型都不可用时返回「请调用内置 ImageGen」的委托指令 |
+| **永不卡死** | 出厂自带 `native` 兜底 | 图片 / 视频池各带一条 `builtin-imagen` / `builtin-video`（priority 1000000，页面标为「内置」、只可隐藏），真模型都不可用时返回「请调用内置 ImageGen」的委托指令 |
 | **零依赖** | 纯标准库 | 没装 PyYAML 就用内置 `miniyaml`，两条解析路径**逐字节比对**过 |
 | **网页配置** | 本地单文件配置台 | 配厂商/模型、滑块调权重、一键验密钥，不用手写 YAML |
 | **结果回传** | 元数据 / 视觉描述 | 让看不见图的文本模型拿到一句真实画面描述，接着往下推理 |
@@ -96,14 +96,22 @@
 另有两条特殊条目：**内置工具兜底**（`native`，无需密钥）和**自定义接口（其他协议）**（`generic_http`，可接任意 REST 接口，请求与返回结构都得自己写进 `options`）。
 
 出厂配置的图片池和视频池里各带一条 `native` 兜底（`builtin-imagen` / `builtin-video`），priority 填的是
-最大值，所以你加的第三方模型永远排在它们前面；只有真模型全都不可用时才轮到它们 —— 这就是
-「没配任何 Key 也能跑」的由来。各平台的完整接入参数见 [`references/providers.md`](references/providers.md)。
+最大值（1000000），所以你加的第三方模型永远排在它们前面；只有真模型全都不可用时才轮到它们 —— 这就是
+「没配任何 Key 也能跑」的由来。这两个条目在配置页面里标为「内置」，**不能编辑或删除，只能隐藏**；
+隐藏只写一条叠加层覆盖，不改 `models.yaml`，随时可以点回来。各平台的完整接入参数见 [`references/providers.md`](references/providers.md)。
 
 ---
 
 ## 安装
 
-把这个目录整个复制到目标 agent 的 skills 目录下即可。
+先在仓库根目录生成**运行时目录**（只含 `SKILL.md`、`scripts/`、`config/`、`references/`、
+`assets/` 和 `LICENSE`）：
+
+```bash
+python3 tools/build_pack.py --runtime
+```
+
+然后把 `dist/media-router/` 整个复制到目标 agent 的 skills 目录下：
 
 | 环境 | 用户级（所有项目可用） | 项目级（只在此仓库生效） |
 |---|---|---|
@@ -114,15 +122,22 @@
 
 Windows 下 `~` 指 `C:\Users\<你>`。
 
+> **不要直接复制仓库根目录。** 那里有 `README.md`、测试、`outputs/`、`dist/`、`.git/` 等开发文件，
+> 模型触发技能后容易被这些无关内容带偏，白白多读很多文件。`--runtime` 生成的目录已经剔除了它们。
+>
+> **升级已装好的技能时**，保留原目录 `config/` 里的个人配置（`models.yaml`、`models.web.yaml`、
+> `secrets*.yaml`），只覆盖 `SKILL.md`、`scripts/`、`references/`、`assets/`。`--runtime` 里的
+> `config/` 是出厂模板，直接整目录覆盖会重置你已有的模型池和密钥。
+
 ### 从 DSH 插件市场装（deepseek harness）
 
 不想手动复制就走这条路：在 DSH 里打开插件市场，搜「图片/视频生成调度」，点一键安装。
 装完落在 `~/.agents/skills/media-router/` —— 它和 `~/.dsh/skills/` 都是 DSH 的用户级
 skill 根目录，会被一起扫描，所以新开一个会话就能用，不用再手动复制。
 
-市场装的是 Release 里附带的 pack 包，已经包含 `SKILL.md`、`scripts/`、`config/`、
-`references/` 和 `assets/`。仓库根目录的 `tools/`（打包脚本）与 `pack/`（上架元数据）
-只服务于发布流程，不会进到你机器上的 skill 目录里。
+市场装的是 Release 里附带的 pack 包，只包含运行时文件（`SKILL.md`、`scripts/`、`config/`、
+`references/`、`assets/` 和 `LICENSE`），**不含 README、测试和产物**。仓库根目录的
+`tools/`（打包脚本）与 `pack/`（上架元数据）只服务于发布流程，不会进到你机器上的 skill 目录里。
 
 ---
 
@@ -193,6 +208,11 @@ python3 scripts/media_router.py web
 而且随时可以重新添加同 id 的模型恢复。所以按钮上写的是「隐藏」而不是「删除」，确认框里也会说明。
 想彻底删掉请直接编辑 `models.yaml`。
 
+**内置兜底（`builtin-imagen` / `builtin-video`）是例外：没有「测试 / 编辑 / 删除」，只有一个「隐藏」按钮。**
+它不调用任何接口，改它没有意义，所以页面和后端都禁止编辑；隐藏会在叠加层写一条同 id 的
+`enabled: false` 覆盖，对路由的效果是「不参与调度」，但 `models.yaml` 一个字不动，
+再点一次「恢复显示」就回来了。
+
 **厂商也一样。** 删掉一条手写在 `models.yaml` 里的厂商，页面同样只能写一条厂商墓碑把它盖住，
 并提示你「已删除，但文件里那段还在」—— 想彻底删掉得自己去改 `models.yaml`。
 删除厂商时会连带把它名下的模型一并隐藏（否则配置会引用一个不存在的厂商而加载失败），
@@ -239,7 +259,7 @@ python3 scripts/media_router.py generate --kind image --prompt "一只戴圆框�
 具体的参数用 `... <子命令> --help`。
 
 **没配任何 Key 也能跑。** 出厂配置的图片池和视频池里各带了一条 `provider: native` 的兜底条目
-（`builtin-imagen` / `builtin-video`，priority 9），它们不会真出图，而是返回「请调用 ImageGen /
+（`builtin-imagen` / `builtin-video`，priority 1000000），它们不会真出图，而是返回「请调用 ImageGen /
 VideoGen」的指令（`status: delegate`，退出码 3），交给 agent 用它自己的内置工具完成。
 priority 是最大的，所以你自己加的第三方模型永远排在它们前面；真模型全都不可用时才轮到它们，
 这样在没配 Key 或 Key 全挂了时任务也不会彻底卡死。
@@ -267,7 +287,17 @@ python3 scripts/selftest_web.py  # 网页配置全链路
 ```
 
 两个脚本**都不需要任何 API Key**，全绿就说明这套代码在你的环境里可用
-（Windows 中文环境、Python 3.13 实测：`166/166`、`231/231`）。
+（Windows 中文环境、Python 3.13 实测：`173/173`、`243/243`）。
+
+另有 3 个低成本测试，不启浏览器、不写仓库 `dist`：
+
+```bash
+node tests/test_page_render.js       # 页面 JS 渲染（假 DOM，零依赖，需要 Node）
+python3 tests/test_page_static.py    # 阻塞弹窗 / 关键结构静态扫描
+python3 tests/test_build_runtime.py  # 运行时包冒烟（写临时目录）
+```
+
+这些测试只用于开发，不会进运行时包。
 
 `selftest.py` 会在本地起一个模拟的异步任务接口，把「提交 → 轮询 → 下载 → 落盘 → 读元数据 → 失败降级」
 整条链路真跑一遍。
@@ -459,13 +489,13 @@ media-router/
 │   ├── models.yaml           # ★ 你维护的模型池
 │   ├── models.web.yaml       # 配置页面生成的厂商/模型（叠加层，**不入库**）
 │   ├── models.web.example.yaml # 上面那份的格式示例（入库）
-│   └── secrets.example.yaml  # 密钥样例，复制成 secrets.yaml
+│   ├── secrets.example.yaml  # 密钥样例，复制成 secrets.yaml
 │   ├── secrets.yaml          # 真实密钥（不入库，本目录里可能没有）
 │   └── secrets.web.yaml      # 页面写入的密钥（不入库，本目录里可能没有）
 ├── scripts/
 │   ├── media_router.py       # CLI 入口
-│   ├── selftest.py           # 无需 Key 的路由/生成端到端自检
-│   ├── selftest_web.py       # 无需 Key 的网页配置端到端自检
+│   ├── selftest.py           # 无需 Key 的路由/生成端到端自检（仅开发用）
+│   ├── selftest_web.py       # 无需 Key 的网页配置端到端自检（仅开发用）
 │   └── mrouter/
 │       ├── config.py         # 配置加载、双层叠加与密钥解析
 │       ├── selector.py       # 权重 / 优先级排序算法
@@ -481,8 +511,17 @@ media-router/
 │       └── miniyaml.py       # YAML 子集解析与序列化（没装 pyyaml 时的回退）
 ├── state/health.json         # 运行时熔断状态（首次运行时自动生成）
 ├── outputs/                  # 产物默认落盘位置：运行命令时的当前工作目录下（不一定是这里）
-└── references/providers.md   # 各平台接入参数对照
+├── references/
+│   ├── providers.md          # 各平台接入参数对照
+│   └── setup.md              # 配置/排障说明（按需读，正常生成不需要）
+├── tests/                    # 3 个低成本测试（仅开发用，不进运行时包）
+├── tools/build_pack.py       # 打包：--runtime 生成干净运行时目录，默认生成市场 pack
+├── pack/manifest.json        # DSH 插件市场上架元数据
+└── dist/                     # 打包产物（不入库）
 ```
+
+运行时包只包含 `SKILL.md`、`scripts/media_router.py` 与 `scripts/mrouter/`、`config/`（模型池与示例）、
+`references/`、`assets/` 和 `LICENSE`；README、测试、`state/`、`outputs/`、`dist/` 都不会进安装目录。
 
 ---
 

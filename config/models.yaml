@@ -3,8 +3,9 @@
 # ----------------------------------------------------------------------------
 # 这是你唯一需要长期维护的文件。改完直接生效，不用重启任何东西。
 #
-# 初始状态模型池为空 —— 用 `media_router.py web` 在网页上添加，
-# 或参考下面的注释示例手写。想看各平台的完整写法见 references/providers.md。
+# 每个池默认只带一条内置兜底（builtin-imagen / builtin-video）；把你自己的模型加到
+# models: 下面即可，改完直接生效。也可以运行 `media_router.py web` 在网页上添加。
+# 想看各平台的完整写法见 references/providers.md。
 #
 # 三个核心字段的语义：
 #   priority  优先级档位，数值越小越优先。priority=1 的模型永远压过 priority=2。
@@ -70,11 +71,12 @@ image:
   strategy: priority_then_weight
   models:
     # 内置工具兜底：不调任何接口，把请求交回给 AI 助手，让它用自己的 ImageGen 完成。
-    # priority 给一个最大的数，保证它永远排在真模型后面；没配 Key 时靠它兜底，
+    # priority 给一个很大的数（1000000），保证它永远排在真模型后面；没配 Key 时靠它兜底，
     # 任务不会直接失败（返回 status: delegate，退出码 3）。自己加的模型会自动排在它前面。
+    # 配置页面把它标为「内置」，不允许编辑/删除，只能隐藏。
     - id: builtin-imagen
       provider: native
-      priority: 9
+      priority: 1000000
       weight: 100
       enabled: true
       supports: [text2img, img2img]
@@ -100,10 +102,10 @@ image:
 video:
   strategy: priority_then_weight
   models:
-    # 同图片池的内置工具兜底，委托给 agent 的 VideoGen。
+    # 同图片池的内置工具兜底，委托给 agent 的 VideoGen。同样只可隐藏、不可编辑。
     - id: builtin-video
       provider: native
-      priority: 9
+      priority: 1000000
       weight: 100
       enabled: true
       supports: [text2video, img2video]
