@@ -758,6 +758,18 @@ def _make_handler(app: ConfigServer) -> type[BaseHTTPRequestHandler]:
                     return False
             return True
 
+        def _cookie_token(self) -> str:
+            raw = self.headers.get("Cookie") or ""
+            if not raw:
+                return ""
+            jar = SimpleCookie()
+            try:
+                jar.load(raw)
+            except CookieError:
+                return ""
+            morsel = jar.get(COOKIE_NAME)
+            return morsel.value if morsel else ""
+
         def _token_ok(self) -> bool:
             """令牌只认请求头和 cookie，**不认 URL 查询参数**。
 
@@ -766,18 +778,15 @@ def _make_handler(app: ConfigServer) -> type[BaseHTTPRequestHandler]:
             撒到本机各处。现在页面地址干干净净，鉴权只有两条路：
             fetch 走 X-MR-Token 头（页面 HTML 里内联），
             预览图走 SameSite=Strict + HttpOnly 的 cookie。
+
+            cookie 只对 GET/HEAD /api/file 放行 —— <img>/<video> 带不了请求头，
+            别的接口（尤其是写接口）必须显式带 token，免得 cookie 变成
+            一把随手可用的通用凭据。
             """
             supplied = self.headers.get("X-MR-Token") or ""
-            if not supplied:
-                raw = self.headers.get("Cookie") or ""
-                if raw:
-                    jar = SimpleCookie()
-                    try:
-                        jar.load(raw)
-                    except CookieError:
-                        jar = SimpleCookie()
-                    morsel = jar.get(COOKIE_NAME)
-                    supplied = morsel.value if morsel else ""
+            if not supplied and self.command in ("GET", "HEAD"):
+                if urlparse(self.path).path == "/api/file":
+                    supplied = self._cookie_token()
             return bool(supplied) and hmac.compare_digest(str(supplied), app.token)
 
         def _body(self) -> dict[str, Any]:
@@ -992,7 +1001,6 @@ def run(
                 "url": url,
                 "host": server.host,
                 "port": server.port,
-                "token": server.token,
                 "overlay_path": str(store.overlay_path()),
                 "secrets_path": str(config.secrets_write_path()),
                 "readonly": store.readonly_reason(),

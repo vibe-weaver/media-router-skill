@@ -973,14 +973,14 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
 
     cookie_raw = _raw_get("/api/bootstrap", f"Cookie: {webserver.COOKIE_NAME}={server.token}\r\n")
     check(
-        "cookie 能通过鉴权（预览图靠它）",
-        " 200 " in cookie_raw.split("\r\n")[0],
+        "cookie 不能当通用凭据（只有预览图能用）",
+        " 401 " in cookie_raw.split("\r\n")[0],
         cookie_raw.split("\r\n")[0],
     )
 
     bad_cookie_raw = _raw_get("/api/bootstrap", f"Cookie: {webserver.COOKIE_NAME}=nope\r\n")
     check(
-        "错误 cookie 被拒",
+        "cookie 值不对也不放行",
         " 401 " in bad_cookie_raw.split("\r\n")[0],
         bad_cookie_raw.split("\r\n")[0],
     )
@@ -1299,6 +1299,24 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
     try:
         status, body = client.call("GET", "/api/file?path=" + urllib.parse.quote(str(sample)))
         check("能预览 outputs 里的文件", status == 200 and body == "hello", f"status={status} {body!r}")
+        preview_raw = _raw_get(
+            "/api/file?path=" + urllib.parse.quote(str(sample)),
+            f"Cookie: {webserver.COOKIE_NAME}={server.token}\r\n",
+        )
+        check(
+            "只带 cookie 就能预览（<img> 带不了请求头）",
+            " 200 " in preview_raw.split("\r\n")[0],
+            preview_raw.split("\r\n")[0],
+        )
+        bad_preview_raw = _raw_get(
+            "/api/file?path=" + urllib.parse.quote(str(sample)),
+            f"Cookie: {webserver.COOKIE_NAME}=nope\r\n",
+        )
+        check(
+            "预览时错误 cookie 被拒",
+            " 401 " in bad_preview_raw.split("\r\n")[0],
+            bad_preview_raw.split("\r\n")[0],
+        )
     finally:
         sample.unlink(missing_ok=True)
 
