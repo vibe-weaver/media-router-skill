@@ -232,6 +232,19 @@ MEDIA_ROUTER_CONFIG_DIR=/tmp/mr-test python3 scripts/media_router.py web
 `MEDIA_ROUTER_SECRETS` / `MEDIA_ROUTER_STATE_DIR` / `MEDIA_ROUTER_OUTPUT_DIR` 同理。
 写自检、做试验时都用得上。
 
+#### 网络与代理
+
+访问厂商接口时默认沿用环境变量里的 `HTTP_PROXY` / `HTTPS_PROXY`（公司网络、抓包工具都靠它）。
+如果你不希望带密钥的请求经过代理：
+
+```bash
+MEDIA_ROUTER_PROXY=none python3 scripts/media_router.py generate ...          # 强制直连
+MEDIA_ROUTER_PROXY=http://127.0.0.1:7890 python3 scripts/media_router.py generate ...  # 只走这个代理
+```
+
+回环地址（`127.0.0.1` / `localhost`）永远直连，不受这两个变量影响。
+当前生效的策略可以用 `python3 scripts/media_router.py config` 看到（`"proxy"` 字段）。
+
 ### 路线 B · 命令行 60 秒
 
 ```bash
@@ -420,11 +433,14 @@ PyYAML 的正则，并且在自检里**逐字节比对两条解析路径**解析
 |---|---|
 | `off` | 只给文件路径 |
 | `metadata` | 额外给宽高/时长/大小（默认，零成本） |
-| `vlm` | **再调一次视觉模型产出一句话描述**，填 `caption.model` 与 `caption.api_key_env` 即可 |
+| `vlm` | **再调一次视觉模型产出一句话描述**，填 `caption.model`、`caption.endpoint` 与 `caption.api_key_env` 即可 |
 
 为什么建议开 `vlm`：文本模型看不见图片，如果只拿到一个路径，它要么继续卡着、要么只好瞎猜画面。
 给一句真实描述，它就能接着写文案、做汇报、往下推理。视频用 ffmpeg 抽一帧再送视觉模型
 （环境里有 ffmpeg 才生效，没有就只给元数据）。
+
+> `caption.endpoint` 是**必填**的，缺了会直接报错，不会回退到任何厂商的默认地址 ——
+> 那次回退正是「密钥配的是别家、请求却发到 OpenAI」的来源。
 
 ---
 

@@ -8,9 +8,11 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import mimetypes
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -19,9 +21,80 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-USER_AGENT = "media-router/1.0 (+skill)"
+from . import __version__
+
+USER_AGENT = f"media-router/{__version__} (+skill)"
 
 RETRY_STATUS = {408, 425, 429, 500, 502, 503, 504}
+
+#: 显式代理开关。不设 = 沿用 HTTP(S)_PROXY 环境变量；设成 none/off/direct = 直连；
+#: 设成 URL = 所有外部请求走这个代理。回环地址永远直连，不受这里影响。
+PROXY_ENV = "MEDIA_ROUTER_PROXY"
+_NO_PROXY_VALUES = {"none", "off", "0", "false", "direct"}
+
+#: 查询串里看着像凭据的参数名 —— 有些自建接口用 ?key= 带密钥，
+#: 一旦 URL 进了日志或错误信息，密钥就跟着漏了。
+_SENSITIVE_PARAM = re.compile(
+    r"(?i)([?&](?:key|api[_-]?key|apikey|token|access[_-]?token|secret|signature|sig)=)([^&\s\"'<>]+)"
+)
+
+
+def redact(text: str) -> str:
+    """把 URL 查询串里的凭据值打码，日志/错误信息/JSON 输出都要先过它。"""
+    return _SENSITIVE_PARAM.sub(r"\1***", str(text))
+
+
+def _is_loopback_url(url: str) -> bool:
+    host = (urllib.parse.urlparse(str(url)).hostname or "").lower()
+    if host in ("localhost", "::1"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+_OPENERS: dict[str, urllib.request.OpenerDirector] = {}
+
+
+def _build_opener(spec: str) -> urllib.request.OpenerDirector:
+    cached = _OPENERS.get(spec)
+    if cached is not None:
+        return cached
+    if spec.lower() in _NO_PROXY_VALUES:
+        handler = urllib.request.ProxyHandler({})
+    elif spec:
+        handler = urllib.request.ProxyHandler({"http": spec, "https": spec})
+    else:
+        handler = urllib.request.ProxyHandler()
+    opener = urllib.request.build_opener(handler)
+    _OPENERS[spec] = opener
+    return opener
+
+
+def proxy_description() -> str:
+    """当前代理策略的人话描述，给 `config` 子命令和排障用。"""
+    spec = os.environ.get(PROXY_ENV, "").strip()
+    if spec.lower() in _NO_PROXY_VALUES:
+        return f"直连（{PROXY_ENV}={spec}）"
+    if spec:
+        return f"使用指定代理 {spec}"
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        if os.environ.get(name):
+            return (
+                f"沿用环境变量 {name}；密钥会经过该代理。"
+                f"不想这样就把 {PROXY_ENV} 设成 none"
+            )
+    return "直连（未配置代理）"
+
+
+def open_request(req: urllib.request.Request, timeout: float):
+    """按代理策略打开请求。回环地址永远直连 —— 本机服务和测试不该被代理截走。"""
+    url = getattr(req, "full_url", "")
+    if _is_loopback_url(url):
+        return _build_opener("none").open(req, timeout=timeout)
+    spec = os.environ.get(PROXY_ENV, "").strip()
+    return _build_opener(spec).open(req, timeout=timeout)
 
 
 class HttpError(RuntimeError):
@@ -122,7 +195,7 @@ def request(
             url, data=payload, headers=final_headers, method=method.upper()
         )
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with open_request(req, timeout=timeout) as resp:
                 return HttpResponse(
                     resp.status, dict(resp.headers.items()), resp.read()
                 )
@@ -136,13 +209,13 @@ def request(
                 last_error = HttpError(f"HTTP {exc.code}", exc.code, body)
                 time.sleep(retry_backoff ** attempt)
                 continue
-            raise HttpError(f"HTTP {exc.code} {url}", exc.code, body) from exc
+            raise HttpError(f"HTTP {exc.code} {redact(url)}", exc.code, body) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             if attempt <= max_retries:
                 last_error = exc
                 time.sleep(retry_backoff ** attempt)
                 continue
-            raise HttpError(f"网络错误：{exc} ({url})") from exc
+            raise HttpError(f"网络错误：{exc} ({redact(url)})") from exc
 
     raise HttpError(f"请求失败：{last_error}")
 
@@ -195,7 +268,7 @@ def download(
 
     req = urllib.request.Request(url, headers=final_headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp, tmp.open("wb") as fh:
+        with open_request(req, timeout=timeout) as resp, tmp.open("wb") as fh:
             while True:
                 chunk = resp.read(1024 * 256)
                 if not chunk:
@@ -203,14 +276,14 @@ def download(
                 fh.write(chunk)
     except urllib.error.HTTPError as exc:
         _drop()
-        raise HttpError(f"下载失败 HTTP {exc.code}：{url}", exc.code) from exc
+        raise HttpError(f"下载失败 HTTP {exc.code}：{redact(url)}", exc.code) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         _drop()
-        raise HttpError(f"下载失败：{exc} ({url})") from exc
+        raise HttpError(f"下载失败：{exc} ({redact(url)})") from exc
 
     if not tmp.exists() or tmp.stat().st_size == 0:
         _drop()
-        raise HttpError(f"下载得到空文件：{url}")
+        raise HttpError(f"下载得到空文件：{redact(url)}")
     tmp.replace(dest)
     return dest
 

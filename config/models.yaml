@@ -59,7 +59,9 @@ defaults:
   #         vlm       额外调用视觉模型产出一句话描述 ← 推荐，能真正接住任务
   caption:
     mode: metadata
-    endpoint: https://api.openai.com/v1/chat/completions
+    # mode 改成 vlm 时这里必填：写清视觉模型的地址。
+    # 不设兜底地址，是为了避免"密钥配的是别家、请求却发到默认厂商"。
+    endpoint: ""
     model: ""
     api_key_env: OPENAI_API_KEY
     prompt: "用一两句中文客观描述这张图片：主体内容、风格、构图与配色。"

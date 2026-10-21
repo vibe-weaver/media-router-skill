@@ -248,10 +248,17 @@ def vlm_caption(
 ) -> tuple[str, str]:
     """调 VLM 产出文字描述。返回 (描述, 错误说明)。"""
     raw = caption_config(cfg)
-    endpoint = str(raw.get("endpoint") or "https://api.openai.com/v1/chat/completions")
+    # 地址必须显式写。以前这里兜底到 api.openai.com，于是"把 caption 的密钥
+    # 配成别家平台的、地址忘了改"就会把密钥发到 OpenAI 去 —— 宁可报错。
+    endpoint = str(raw.get("endpoint") or "").strip()
     model = str(raw.get("model") or "")
     if not model:
         return "", "caption.model 未配置"
+    if not endpoint:
+        return "", (
+            "caption.endpoint 未配置：视觉描述要请求哪个地址必须显式填写"
+            "（例如 https://api.openai.com/v1/chat/completions，或你的网关地址）"
+        )
 
     key = _caption_key(cfg, raw)
     if not key:

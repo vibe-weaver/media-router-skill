@@ -388,6 +388,9 @@ def main() -> int:
     print("\n[selftest] 已修 bug 的回归断言（第二轮）")
     check_bugfixes_round2(check)
 
+    print("\n[selftest] 安全加固回归")
+    check_hardening(check)
+
     passed = sum(1 for _, ok, _ in results if ok)
     for name, ok, detail in results:
         mark = "PASS" if ok else "FAIL"
@@ -2189,6 +2192,138 @@ def check_bugfixes_round2(check) -> None:
             for _v in _providers_by_kind.values()
         ),
         str(_providers_by_kind),
+    )
+
+
+def check_hardening(check) -> None:
+    """安全加固回归：凭据打码、代理开关、caption 地址必填。"""
+    import os
+    import types
+
+    from mrouter import caption, transport  # noqa: PLC0415
+
+    # ---------------------------------------------------------- 凭据打码
+    # 自建接口可以用 ?key= 传密钥，那条 URL 一旦进日志/错误/JSON 就漏了。
+    plain = "https://gw.example.com/gen?key=sk-abc123&n=1"
+    check(
+        "打码：?key= 的值被掩掉",
+        transport.redact(plain) == "https://gw.example.com/gen?key=***&n=1",
+        transport.redact(plain),
+    )
+    for param in ("api_key", "apikey", "token", "access_token"):
+        raw = f"https://gw.example.com/x?{param}=secret-value"
+        check(
+            f"打码：{param} 也被掩掉",
+            "secret-value" not in transport.redact(raw),
+            transport.redact(raw),
+        )
+    check(
+        "打码：普通 URL 原样返回",
+        transport.redact("https://api.example.com/v1/tasks/123?page=2")
+        == "https://api.example.com/v1/tasks/123?page=2",
+    )
+
+    # ---------------------------------------------------------- 代理开关
+    saved = {
+        name: os.environ.get(name)
+        for name in (
+            "MEDIA_ROUTER_PROXY",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "https_proxy",
+        )
+    }
+    try:
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            os.environ.pop(name, None)
+        os.environ.pop("MEDIA_ROUTER_PROXY", None)
+        check("默认无代理时描述为直连", "直连" in transport.proxy_description(), transport.proxy_description())
+
+        os.environ["HTTPS_PROXY"] = "http://10.0.0.1:7890"
+        described = transport.proxy_description()
+        check(
+            "环境变量有代理时点名来源，并说明怎么关掉",
+            "HTTPS_PROXY" in described and "none" in described,
+            described,
+        )
+
+        os.environ["MEDIA_ROUTER_PROXY"] = "none"
+        check(
+            "MEDIA_ROUTER_PROXY=none 覆盖环境变量",
+            "直连" in transport.proxy_description(),
+            transport.proxy_description(),
+        )
+
+        # 回环地址必须绕过代理：代理指向一个必然连不上的地址，本地请求仍要成功。
+        os.environ["MEDIA_ROUTER_PROXY"] = "http://127.0.0.1:9"
+
+        class _Ping(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                body = b"pong"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args) -> None:  # noqa: D401
+                return
+
+        pinger = ThreadingHTTPServer(("127.0.0.1", 0), _Ping)
+        threading.Thread(target=pinger.serve_forever, daemon=True).start()
+        try:
+            resp = transport.request(
+                "GET",
+                f"http://127.0.0.1:{pinger.server_address[1]}/ping",
+                max_retries=0,
+                timeout=5,
+            )
+            check(
+                "回环地址绕过代理，本地请求照常成功",
+                resp.status == 200 and resp.body == b"pong",
+                f"status={resp.status} body={resp.body!r}",
+            )
+        finally:
+            pinger.shutdown()
+            pinger.server_close()
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    # ---------------------------------------------------------- caption 地址必填
+    # 以前缺 endpoint 会兜底到 api.openai.com：密钥配的是别家，请求却发到 OpenAI。
+    base = {"mode": "vlm", "model": "gpt-4o-mini", "api_key_env": "OPENAI_API_KEY"}
+    no_endpoint = types.SimpleNamespace(
+        defaults={"caption": dict(base, endpoint="")}, secrets={"keys": {}}
+    )
+    text, err = caption.vlm_caption(no_endpoint, ["x.png"], "image")
+    check(
+        "caption 缺 endpoint 直接报错，不兜底到任何厂商",
+        text == "" and "caption.endpoint 未配置" in err,
+        err,
+    )
+
+    no_key = types.SimpleNamespace(
+        defaults={
+            "caption": dict(base, endpoint="https://gw.example.com/v1/chat/completions")
+        },
+        secrets={"keys": {}},
+    )
+    text, err = caption.vlm_caption(no_key, ["x.png"], "image")
+    check(
+        "caption 缺密钥时报密钥错误（不会借用别的 key）",
+        text == "" and "密钥" in err,
+        err,
+    )
+
+    check(
+        "User-Agent 带当前版本号",
+        transport.USER_AGENT.startswith("media-router/1.2.0"),
+        transport.USER_AGENT,
     )
 
 

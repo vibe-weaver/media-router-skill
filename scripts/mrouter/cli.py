@@ -37,6 +37,7 @@ from .caption import build_caption, caption_enabled, profile_files
 from .config import ConfigError, RouterConfig, load_config
 from .health import HealthStore
 from .selector import plan_attempts, rank_candidates
+from .transport import proxy_description, redact
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -56,18 +57,19 @@ def _reconfigure_stdout() -> None:
 
 
 def _log(message: str) -> None:
-    """日志走 stderr。空字符串用来打空行，别给它加前缀。"""
+    """日志走 stderr。空字符串用来打空行，别给它加前缀。
+
+    出日志前统一打码：自建接口用 ?key= 传密钥时，整条 URL 会进日志。
+    """
     if message:
-        print(f"[media-router] {message}", file=sys.stderr, flush=True)
+        print(f"[media-router] {redact(message)}", file=sys.stderr, flush=True)
     else:
         print("", file=sys.stderr, flush=True)
 
 
 def _emit(payload: dict[str, Any], pretty: bool) -> None:
-    print(
-        json.dumps(payload, ensure_ascii=False, indent=2 if pretty else None),
-        flush=True,
-    )
+    text = json.dumps(payload, ensure_ascii=False, indent=2 if pretty else None)
+    print(redact(text), flush=True)
 
 
 def _coerce_scalar(text: str) -> Any:
@@ -182,6 +184,7 @@ def cmd_config(args: argparse.Namespace) -> int:
     payload["kinds"] = cfg.kinds()
     payload["providers"] = known_providers()
     payload["caption_mode"] = caption_enabled(cfg)
+    payload["proxy"] = proxy_description()
     _emit(payload, args.pretty)
     return EXIT_OK
 
