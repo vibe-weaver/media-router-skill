@@ -4,7 +4,7 @@
 结果回传」这套逻辑封装成 CLI，供任意 agent（WorkBuddy / Claude Code / DSH 等）调用。
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "miniyaml",
