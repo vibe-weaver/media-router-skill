@@ -2200,6 +2200,7 @@ def check_hardening(check) -> None:
     import os
     import types
 
+    from mrouter import __version__ as mr_version
     from mrouter import caption, transport  # noqa: PLC0415
 
     # ---------------------------------------------------------- 凭据打码
@@ -2221,6 +2222,12 @@ def check_hardening(check) -> None:
         "打码：普通 URL 原样返回",
         transport.redact("https://api.example.com/v1/tasks/123?page=2")
         == "https://api.example.com/v1/tasks/123?page=2",
+    )
+    check(
+        "打码：代理地址里的 user:pass@ 被掩掉",
+        transport.redact("http://alice:s3cret@10.0.0.1:8080")
+        == "http://***@10.0.0.1:8080",
+        transport.redact("http://alice:s3cret@10.0.0.1:8080"),
     )
 
     # ---------------------------------------------------------- 代理开关
@@ -2246,6 +2253,13 @@ def check_hardening(check) -> None:
             "环境变量有代理时点名来源，并说明怎么关掉",
             "HTTPS_PROXY" in described and "none" in described,
             described,
+        )
+
+        os.environ["MEDIA_ROUTER_PROXY"] = "http://alice:s3cret@10.0.0.1:8080"
+        check(
+            "代理描述里不出现代理密码",
+            "s3cret" not in transport.proxy_description(),
+            transport.proxy_description(),
         )
 
         os.environ["MEDIA_ROUTER_PROXY"] = "none"
@@ -2322,7 +2336,7 @@ def check_hardening(check) -> None:
 
     check(
         "User-Agent 带当前版本号",
-        transport.USER_AGENT.startswith("media-router/1.2.0"),
+        transport.USER_AGENT == f"media-router/{mr_version} (+skill)",
         transport.USER_AGENT,
     )
 

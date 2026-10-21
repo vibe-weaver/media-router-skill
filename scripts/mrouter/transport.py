@@ -38,10 +38,18 @@ _SENSITIVE_PARAM = re.compile(
     r"(?i)([?&](?:key|api[_-]?key|apikey|token|access[_-]?token|secret|signature|sig)=)([^&\s\"'<>]+)"
 )
 
+#: 代理地址常写成 http://user:pass@host:port，打印前把凭据段掩掉。
+_USERINFO = re.compile(r"(?i)(//)[^/@\s\"'<>]+@")
+
 
 def redact(text: str) -> str:
-    """把 URL 查询串里的凭据值打码，日志/错误信息/JSON 输出都要先过它。"""
-    return _SENSITIVE_PARAM.sub(r"\1***", str(text))
+    """把 URL 里的凭据打码，日志/错误信息/JSON 输出都要先过它。
+
+    两类都要处理：查询串里的 ``?key=`` / ``?token=``，以及代理地址里可能带上的
+    ``user:pass@host`` —— `config` 子命令会把当前代理策略原样打出来。
+    """
+    cleaned = _USERINFO.sub(r"\1***@", str(text))
+    return _SENSITIVE_PARAM.sub(r"\1***", cleaned)
 
 
 def _is_loopback_url(url: str) -> bool:
@@ -78,7 +86,7 @@ def proxy_description() -> str:
     if spec.lower() in _NO_PROXY_VALUES:
         return f"直连（{PROXY_ENV}={spec}）"
     if spec:
-        return f"使用指定代理 {spec}"
+        return f"使用指定代理 {redact(spec)}"
     for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
         if os.environ.get(name):
             return (
