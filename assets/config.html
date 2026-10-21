@@ -1495,10 +1495,10 @@ async function testModel(box, payload, deep){
         const low = String(f).toLowerCase();
         if(/\.(png|jpe?g|webp|gif)$/.test(low)){
           html += '<img class="preview" src="/api/file?path='+encodeURIComponent(f)+
-            '&t='+encodeURIComponent(TOKEN)+'" alt="真实测试产物">';
+            '" alt="真实测试产物">';
         }else if(/\.(mp4|webm)$/.test(low)){
           html += '<video class="preview" controls src="/api/file?path='+encodeURIComponent(f)+
-            '&t='+encodeURIComponent(TOKEN)+'"></video>';
+            '"></video>';
         }
       }
       box.innerHTML = html;

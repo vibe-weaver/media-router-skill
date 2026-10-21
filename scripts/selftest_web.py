@@ -927,6 +927,63 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
         isinstance(page, str) and server.token in page,
         "页面里的 token 不对",
     )
+    check(
+        "预览图 URL 不再拼 token",
+        isinstance(page, str) and "encodeURIComponent(TOKEN)" not in page,
+        "img/video 的 src 里还带着 token",
+    )
+
+    # token 绝不进 URL —— 那条 URL 会留在浏览器历史、跨设备同步记录和截图里。
+    check(
+        "服务地址里不含 token",
+        "?t=" not in server.url() and server.token not in server.url(),
+        server.url(),
+    )
+
+    page_raw = raw_http(
+        "127.0.0.1",
+        server.port,
+        b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    )
+    set_cookie = [
+        line for line in page_raw.split("\r\n") if line.lower().startswith("set-cookie:")
+    ]
+    check("打开页面时种下预览用 cookie", bool(set_cookie), "响应里没有 Set-Cookie")
+    check(
+        "cookie 是 HttpOnly + SameSite=Strict",
+        bool(set_cookie) and "HttpOnly" in set_cookie[0] and "SameSite=Strict" in set_cookie[0],
+        set_cookie[0] if set_cookie else "没有 Set-Cookie",
+    )
+
+    def _raw_get(path: str, extra: str = "") -> str:
+        return raw_http(
+            "127.0.0.1",
+            server.port,
+            (
+                f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Connection: close\r\n\r\n"
+            ).encode(),
+        )
+
+    query_raw = _raw_get(f"/api/bootstrap?t={server.token}")
+    check(
+        "URL 里的 token 不再算凭据",
+        " 401 " in query_raw.split("\r\n")[0],
+        query_raw.split("\r\n")[0],
+    )
+
+    cookie_raw = _raw_get("/api/bootstrap", f"Cookie: {webserver.COOKIE_NAME}={server.token}\r\n")
+    check(
+        "cookie 能通过鉴权（预览图靠它）",
+        " 200 " in cookie_raw.split("\r\n")[0],
+        cookie_raw.split("\r\n")[0],
+    )
+
+    bad_cookie_raw = _raw_get("/api/bootstrap", f"Cookie: {webserver.COOKIE_NAME}=nope\r\n")
+    check(
+        "错误 cookie 被拒",
+        " 401 " in bad_cookie_raw.split("\r\n")[0],
+        bad_cookie_raw.split("\r\n")[0],
+    )
 
     # 页面是一整块 HTML，JS 写坏了要到浏览器里才看得出来。有 node 就顺手验一下语法。
     check_page_js(page)

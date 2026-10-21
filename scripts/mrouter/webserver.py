@@ -9,7 +9,8 @@
   * 只监听回环地址（127.0.0.1），默认拒绝绑定其他网卡
   * 校验 Host 头，防 DNS rebinding（攻击者把自己的域名解析到 127.0.0.1）
   * 校验 Origin/Referer，防跨站请求（别的网页偷偷 POST 过来）
-  * 每次启动生成一次性随机 token，页面请求必须带上，放在 URL 里的只用于预览图
+  * 每次启动生成一次性随机 token，页面请求必须带上；token 只走请求头和
+    HttpOnly cookie，绝不写进 URL —— URL 会残留在浏览器历史、同步记录和截图里
   * /api/file 只允许读 <skill>/outputs 里的文件，杜绝任意文件读取
   * 写入只落 config/models.web.yaml 和 config/secrets.web.yaml，
     绝不碰用户手写的 models.yaml / secrets.yaml
@@ -27,6 +28,7 @@ import socket
 import sys
 import threading
 import webbrowser
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -37,6 +39,8 @@ from . import catalog, config, probe, store
 ASSETS_DIR = config.SKILL_DIR / "assets"
 PAGE_FILE = ASSETS_DIR / "config.html"
 TOKEN_PLACEHOLDER = "__MR_TOKEN__"
+#: 预览图靠这个 cookie 鉴权 —— <img>/<video> 没法带自定义请求头
+COOKIE_NAME = "mr_token"
 
 MAX_BODY = 2 * 1024 * 1024  # 2 MiB，配置文件不可能这么大
 DEFAULT_PORT = 8760
@@ -596,8 +600,9 @@ class ConfigServer:
         return f"http://{self.host}:{self.port}"
 
     def url(self) -> str:
-        # 带上 token，用户手工复制链接时也能直接用
-        return f"{self.origin}/?t={self.token}"
+        # 不带 token：URL 会进浏览器历史、跨设备同步、截图和聊天记录。
+        # 页面本身就把 token 内联在 HTML 里，打开这个地址就能正常用。
+        return f"{self.origin}/"
 
     def _render_page(self) -> str:
         with self._page_lock:
@@ -754,10 +759,25 @@ def _make_handler(app: ConfigServer) -> type[BaseHTTPRequestHandler]:
             return True
 
         def _token_ok(self) -> bool:
+            """令牌只认请求头和 cookie，**不认 URL 查询参数**。
+
+            以前页面地址是 /?t=TOKEN，方便用户复制链接；但那条 URL 会留在
+            浏览器历史、跨设备同步、截图和聊天记录里，等于把唯一的写凭据
+            撒到本机各处。现在页面地址干干净净，鉴权只有两条路：
+            fetch 走 X-MR-Token 头（页面 HTML 里内联），
+            预览图走 SameSite=Strict + HttpOnly 的 cookie。
+            """
             supplied = self.headers.get("X-MR-Token") or ""
             if not supplied:
-                parsed = urlparse(self.path)
-                supplied = (parse_qs(parsed.query).get("t") or [""])[0]
+                raw = self.headers.get("Cookie") or ""
+                if raw:
+                    jar = SimpleCookie()
+                    try:
+                        jar.load(raw)
+                    except CookieError:
+                        jar = SimpleCookie()
+                    morsel = jar.get(COOKIE_NAME)
+                    supplied = morsel.value if morsel else ""
             return bool(supplied) and hmac.compare_digest(str(supplied), app.token)
 
         def _body(self) -> dict[str, Any]:
@@ -834,7 +854,7 @@ def _make_handler(app: ConfigServer) -> type[BaseHTTPRequestHandler]:
                 return
             if path.startswith("/api/") and not self._token_ok():
                 self._reject(
-                    401, "缺少或错误的访问令牌，请从终端里那条带 token 的链接打开页面"
+                    401, "缺少或错误的访问令牌，请在终端里重新打开页面地址"
                 )
                 return
 
@@ -842,9 +862,19 @@ def _make_handler(app: ConfigServer) -> type[BaseHTTPRequestHandler]:
             if self.command in ("POST", "PUT", "PATCH"):
                 body = self._body()
 
-            # 页面自身
+            # 页面自身。顺手把 token 种进 SameSite=Strict 的 HttpOnly cookie：
+            # 预览图 <img>/<video> 带不了请求头，只能靠它。
             if path in ("/", "/index.html"):
-                self._send(200, app._render_page().encode("utf-8"), "text/html; charset=utf-8")
+                self._send(
+                    200,
+                    app._render_page().encode("utf-8"),
+                    "text/html; charset=utf-8",
+                    {
+                        "Set-Cookie": (
+                            f"{COOKIE_NAME}={app.token}; Path=/; HttpOnly; SameSite=Strict"
+                        )
+                    },
+                )
                 return
 
             if path == "/api/file":
