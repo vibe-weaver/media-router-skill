@@ -6,7 +6,7 @@
 
 # media-router
 
-**给文本模型补上「出图 / 出视频」这条腿**
+**给文本模型补上「出图 / 出视频 / 出语音」这条腿**
 
 按优先级分档 · 同档加权随机 · 失败自动降级 · 连续失败熔断 · 产物回传
 
@@ -14,6 +14,10 @@
 ![依赖](https://img.shields.io/badge/依赖-零，纯标准库-brightgreen)
 ![平台](https://img.shields.io/badge/平台-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Stars](https://img.shields.io/github/stars/vibe-weaver/media-router-skill?color=yellow)
+![version](https://img.shields.io/github/v/release/vibe-weaver/media-router-skill?label=version&color=blue)
+![License](https://img.shields.io/github/license/vibe-weaver/media-router-skill)
+
+**最新版本：[v1.3.0](https://github.com/vibe-weaver/media-router-skill/releases/latest) · [变更记录](CHANGELOG.md)**
 
 </div>
 
@@ -21,7 +25,7 @@
 
 ## 为什么需要它
 
-文本模型遇到「生成一张图」「做个视频」这类步骤时，只会说「我做不到」——任务就断在那里。
+文本模型遇到「生成一张图」「做个视频」「配段旁白」这类步骤时，只会说「我做不到」——任务就断在那里。
 
 `media-router` 用一个**你自己维护的多模型池**把这一步接上：按优先级分档、同档内按权重加权随机挑模型，
 失败自动降级到下一个候选，连续失败自动熔断，最后把**产物路径 + 文字描述**交回给文本模型，让原任务继续往下走。
@@ -36,7 +40,7 @@
 ## 工作流程
 
 ```
-文本模型：「先画一张橘猫插画，再给它配段文案」
+文本模型：「先画一张橘猫插画，再给它配段旁白」
                  │
                  ▼
         读 config/models.yaml 的模型池
@@ -50,7 +54,7 @@
                  │
         失败 ────┴──── 成功
          │              │
-    换下一个候选    下载产物 → 落盘 outputs/
+    换下一个候选    下载产物 → 落盘 outputs/<kind>/
          │              │
     连续失败 N 次     读元数据 / 可选视觉描述
          │              │
@@ -61,6 +65,9 @@
                         文本模型接着写文案，任务继续
 ```
 
+图片、视频、语音走同一套路由，只是 `--kind` 不同：产物分别落 `outputs/image/`、
+`outputs/video/`、`outputs/audio/`。
+
 ---
 
 ## 特性一览
@@ -70,7 +77,7 @@
 | **多模型池** | 优先级分档 + 同档加权随机 | 想让 A 永远优先就分开档位；想 5:3 分摊流量就同档设 50:30 |
 | **自动降级** | 失败即换下一个候选 | 缺密钥的模型会被跳过，**且不占用重试次数** |
 | **自动熔断** | 连续失败进入冷却 | 冷却期内不再被选中，成功后计数清零；状态落在 `state/health.json` |
-| **永不卡死** | 出厂自带 `native` 兜底 | 图片 / 视频池各带一条 `builtin-imagen` / `builtin-video`（priority 1000000，页面标为「内置」、只可隐藏），真模型都不可用时返回「请调用内置 ImageGen」的委托指令 |
+| **永不卡死** | 出厂自带 `native` 兜底 | 图片 / 视频池各带一条 `builtin-imagen` / `builtin-video`（priority 1000000，页面标为「内置」、只可隐藏），真模型都不可用时返回「请调用内置 ImageGen / VideoGen」的委托指令。语音池默认是空的 —— agent 没有标准内置语音工具，不挂假兜底 |
 | **零依赖** | 纯标准库 | 没装 PyYAML 就用内置 `miniyaml`，两条解析路径**逐字节比对**过 |
 | **网页配置** | 本地单文件配置台 | 配厂商/模型、滑块调权重、一键验密钥，不用手写 YAML |
 | **结果回传** | 元数据 / 视觉描述 | 让看不见图的文本模型拿到一句真实画面描述，接着往下推理 |
@@ -82,16 +89,16 @@
 
 内置 **8 家平台**（点选即配，带中文说明和「去哪拿 Key」的提示）：
 
-| 平台 | 协议 | 图片 | 视频 | 密钥 |
-|---|---|:---:|:---:|---|
-| 火山方舟（即梦 / Seedance） | `volcengine` | ✓ | ✓ | `ARK_API_KEY` |
-| 阿里云百炼（通义万相） | `dashscope` | ✓ | ✓ | `DASHSCOPE_API_KEY` |
-| 可灵（快手） | `kling` | ✓ | ✓ | AK:SK 一对 |
-| OpenAI 及兼容网关 | `openai` | ✓ | ✓ | `OPENAI_API_KEY` |
-| 硅基流动 SiliconFlow | `openai` | ✓ | — | `SILICONFLOW_API_KEY` |
-| Replicate | `replicate` | ✓ | ✓ | `REPLICATE_API_TOKEN` |
-| fal.ai | `fal` | ✓ | ✓ | `FAL_KEY` |
-| 智谱 BigModel（CogView / CogVideoX） | `openai` | ✓ | ✓ | `ZHIPU_API_KEY` |
+| 平台 | 协议 | 图片 | 视频 | 语音 | 密钥 |
+|---|---|:---:|:---:|:---:|---|
+| 火山方舟（即梦 / Seedance / 豆包语音） | `volcengine` | ✓ | ✓ | ✓ | `ARK_API_KEY`（语音单独一把） |
+| 阿里云百炼（通义万相 / CosyVoice） | `dashscope` | ✓ | ✓ | ✓ | `DASHSCOPE_API_KEY` |
+| 可灵（快手） | `kling` | ✓ | ✓ | ✓ | 单个 API Key 或 AK:SK |
+| OpenAI 及兼容网关 | `openai` | ✓ | ✓ | ✓ | `OPENAI_API_KEY` |
+| 硅基流动 SiliconFlow | `openai` | ✓ | — | ✓ | `SILICONFLOW_API_KEY` |
+| Replicate | `replicate` | ✓ | ✓ | — | `REPLICATE_API_TOKEN` |
+| fal.ai | `fal` | ✓ | ✓ | — | `FAL_KEY` |
+| 智谱 BigModel（CogView / CogVideoX / GLM-TTS） | `openai` | ✓ | ✓ | ✓ | `ZHIPU_API_KEY` |
 
 另有两条特殊条目：**内置工具兜底**（`native`，无需密钥）和**自定义接口（其他协议）**（`generic_http`，可接任意 REST 接口，请求与返回结构都得自己写进 `options`）。
 
@@ -631,7 +638,7 @@ media-router/
 │       ├── cli.py            # 命令行
 │       └── miniyaml.py       # YAML 子集解析与序列化（没装 pyyaml 时的回退）
 ├── state/health.json         # 运行时熔断状态（首次运行时自动生成）
-├── outputs/                  # 产物默认落盘位置（<cwd>/outputs/image、<cwd>/outputs/video）
+├── outputs/                  # 产物默认落盘位置（<cwd>/outputs/image、video、audio）
 ├── references/
 │   ├── providers.md          # 各平台接入参数对照
 │   └── setup.md              # 配置/排障说明（按需读，正常生成不需要）
