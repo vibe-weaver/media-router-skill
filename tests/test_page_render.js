@@ -41,10 +41,10 @@ function extractConst(name) {
 
 const FUNCS = [
   "esc", "kindName", "updateKindCounts", "renderModelGroups",
-  "strategyOf", "routingInfo", "shareText", "metricOf", "tierHeader",
+  "routingInfo", "shareText", "metricOf", "tierHeader",
   "kindSummaryHtml", "renderProbability", "renderModelCard", "renderModels",
 ];
-const SRC = extractConst("STRATEGY_HELP") + "\n" + FUNCS.map(extract).join("\n");
+const SRC = extractConst("KIND_NAMES") + "\n" + FUNCS.map(extract).join("\n");
 
 function M(id, extra) {
   return Object.assign({
@@ -64,14 +64,11 @@ const NATIVE = {
   cooldown_remaining_seconds: 0, from_base: true,
 };
 
-function run(models, strategies) {
+function run(models, kinds) {
   const code = `
     const state = {
-      kinds: ["image", "video"],
+      kinds: ${JSON.stringify(kinds || ["image", "video"])},
       models: ${JSON.stringify(models)},
-      strategies: ${JSON.stringify(strategies || {
-        image: "priority_then_weight", video: "priority_then_weight",
-      })},
     };
     const pick = {activeKind: "image", kind: "image"};
     const els = {};
@@ -88,9 +85,8 @@ function run(models, strategies) {
       pages: els["model-list"].innerHTML,
       image: els["model-list-image"].innerHTML,
       video: els["model-list-video"].innerHTML,
+      audio: (els["model-list-audio"] || {innerHTML: ""}).innerHTML,
       summary: els["prob-summary"].innerHTML,
-      strategy: els["strategy-select"].value,
-      hint: els["strategy-hint"].textContent,
       count: els["model-count"].textContent,
       info: routingInfo("image"),
     };
@@ -131,9 +127,34 @@ ok(cardIn(out.image, "base-model").includes("备用档") && !cardIn(out.image, "
    "备用模型不显示 100%");
 ok(!out.image.includes("pbar"), "模型卡不再画重复占比条");
 ok(cardIn(out.image, "builtin-imagen").includes("最后兜底"), "native 标注最后兜底");
-ok(out.strategy === "priority_then_weight", "策略下拉显示「按优先级」");
-ok(out.hint.includes("低档仅作备用"), "按优先级下方有完整解释");
+// 内置兜底不是真模型：不吃也不吐，别给它贴「输入 … → 输出 …」的功能标签
+ok(!cardIn(out.image, "builtin-imagen").includes("badge mod"),
+   "内置兜底不显示输入/输出模态标签");
+ok(cardIn(out.image, "pro-model").includes("badge mod"), "真模型仍然显示模态标签");
+ok(!out.summary.includes("全局权重") && !out.summary.includes("严格顺位"),
+   "摘要只讲按优先级分档（另两种策略已下线）");
 ok(out.count === "3 个模型", "当前页模型计数正确");
+
+// 1b. 语音类目：第三个页签 + 语音模型卡
+out = run(
+  { image: [M("pro")], video: [], audio: [M("tts", {
+      kind: "audio", supports: ["text2audio"],
+      input_modalities: ["text"], output_modalities: ["audio"],
+    })] },
+  ["image", "video", "audio"],
+);
+ok(out.tabs.includes("语音模型"), "存在「语音模型」第三个页签");
+ok((out.audio || "").includes("输出") && (out.audio || "").includes("音频"),
+   "语音模型卡显示「输出 音频」");
+ok((out.audio || "").includes("输入") && (out.audio || "").includes("文本"),
+   "语音模型卡显示「输入 文本」");
+// 新格式用「输入 / 输出」全称 + 「/」分隔多模态，旧的「入 … · … → 出」不再出现
+ok(!(out.audio || "").includes(">入 "), "模态标签不再用单字「入」");
+ok((out.image || "").includes("输入") && (out.image || "").includes("输出"),
+   "图像模型卡也用「输入 / 输出」全称");
+// 语音类目还没有适配器：卡片不提供「测试」，避免给出误导性的探测结论
+ok(!(out.audio || "").includes('data-act="test-model"'), "语音模型卡没有「测试」按钮");
+ok((out.image.match(/data-act="test-model"/g) || []).length >= 1, "图像模型卡仍有「测试」按钮");
 
 // 2. 缺 Key / 熔断
 out = run({image: [M("nokey", {api_key_ready: false}), M("base", {priority: 3})], video: []});
@@ -164,13 +185,11 @@ out = run({image: [M("a", {api_key_ready: false}), M("b", {priority: 3, api_key_
 ok(out.info.poolEmpty === true && out.summary.includes("没有可用的真实模型"),
    "全部缺 Key 时明确报不可用");
 
-// 4. 策略下拉
-out = run({image: [M("a")], video: []}, {image: "weight_only", video: "fallback_chain"});
-ok(out.strategy === "weight_only", "weight_only 策略下拉值");
-ok(out.hint.includes("忽略优先级"), "全局权重下方有完整解释");
-out = run({image: [M("a")], video: []}, {image: "fallback_chain", video: "weight_only"});
-ok(out.strategy === "fallback_chain", "fallback_chain 策略下拉值");
-ok(out.hint.includes("不随机") && out.hint.includes("按顺序降级"), "严格顺位下方有完整解释");
+// 4. 策略只剩一种：页面上不该再出现另外两种
+out = run({image: [M("a")], video: []});
+ok(!out.summary.includes("全局权重") && !out.summary.includes("严格顺位"),
+   "摘要里不再出现「全局权重 / 严格顺位」");
+ok(out.summary.includes("首选档（优先级 1）"), "摘要仍按优先级分档说明");
 
 // 5. P2 计数：停用模型要区分「启用 / 共」
 out = run({image: [M("on"), M("off", {enabled: false})], video: []});

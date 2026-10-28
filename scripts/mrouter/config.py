@@ -53,7 +53,180 @@ def _resolve_default_output_dir() -> Path:
 
 DEFAULT_OUTPUT_DIR = _resolve_default_output_dir()
 
-VALID_STRATEGIES = ("priority_then_weight", "weight_only", "fallback_chain")
+#: 路由策略只剩一种：先按优先级分档，同档按权重分流。
+#: （weight_only / fallback_chain 已下线，老配置里的写法会在加载时被纠正并告警。）
+VALID_STRATEGIES = ("priority_then_weight",)
+
+#: 支持的模型类目。配置池本身是数据驱动的（models.yaml 里任何含 models 的顶层键
+#: 都会变成池子），但「页面能新建什么」「写入时校验哪个类目」需要一份明确清单。
+#: 这里的顺序就是页面页签的顺序。
+MODEL_KINDS = ("image", "video", "audio")
+
+#: 类目的中文名。报错文案和页面都从这里取，避免三处各写一份。
+KIND_LABELS = {"image": "图像", "video": "视频", "audio": "语音"}
+
+#: 各类目允许勾选的模态。页面按这张表渲染多选项，后端按同一张表校验 ——
+#: 两边的可选集合必须是同一份定义，否则页面能选、存下去却被悄悄丢掉。
+#: 合法的英文键就是这张表里出现过的那些：text / image / video / audio。
+MODALITY_OPTIONS: dict[str, tuple[str, ...]] = {
+    "image": ("text", "image"),
+    "video": ("text", "image", "video", "audio"),
+    # 语音：TTS 是「文本进、音频出」，ASR 反过来，语音克隆还要音频进。
+    "audio": ("text", "audio"),
+}
+
+#: 模态的显示名。给 CLI 输出用，agent 读 JSON 时也能直接照抄给用户。
+MODALITY_LABELS = {
+    "text": "文本",
+    "image": "图片",
+    "video": "视频",
+    "audio": "音频",
+}
+
+#: 手写配置里写中文也认。页面上看到的就是「文本 / 图片」，有人照着抄进 YAML
+#: 很正常；不认的话会被当成非法值过滤掉，而用户以为自己写对了。
+MODALITY_ALIASES = {
+    "文本": "text",
+    "文字": "text",
+    "prompt": "text",
+    "图片": "image",
+    "图像": "image",
+    "img": "image",
+    "视频": "video",
+    "影片": "video",
+    "音频": "audio",
+    "语音": "audio",
+    "voice": "audio",
+}
+
+
+def _as_modality_list(raw: Any) -> list[str] | None:
+    """把输入/输出模态字段整理成小写字符串列表。
+
+    兼容三种写法：YAML 列表、JSON 数组、逗号分隔字符串（手写配置里常见）；
+    中文标签（文本/图片/视频/音频）也会翻成对应的英文键。
+    形状不合法（数字、映射）返回 None，由调用方决定是报错还是走默认值。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        parts = re.split(r"[,，、\s]+", raw.strip())
+        items = [p.strip().lower() for p in parts if p.strip()]
+    elif isinstance(raw, (list, tuple, set)):
+        items = [str(x).strip().lower() for x in raw if str(x).strip()]
+    else:
+        return None
+    return [MODALITY_ALIASES.get(v, v) for v in items]
+
+
+def default_modalities(kind: str, supports: Any, which: str) -> list[str]:
+    """没有显式配置模态时，按类目和 supports 推一个合理的默认值。
+
+    默认值必须**和 old 行为的语义对齐**，否则升级后老配置的路由结果会变：
+      * 图像模型：输入「文本」，输出「图片」；有 img2img 就再加输入「图片」。
+      * 视频模型：输入「文本」，输出「视频」；有 img2video 就再加输入「图片」。
+      * 语音模型：输入「文本」，输出「音频」；有 audio2audio 就再加输入「音频」。
+    """
+    sup = set(supports or []) if isinstance(supports, (list, tuple, set)) else set()
+    if which == "output":
+        if kind == "video":
+            return ["video"]
+        if kind == "audio":
+            return ["audio"]
+        return ["image"]
+    if kind == "video":
+        return ["text", "image"] if "img2video" in sup else ["text"]
+    if kind == "audio":
+        return ["text", "audio"] if "audio2audio" in sup else ["text"]
+    return ["text", "image"] if "img2img" in sup else ["text"]
+
+
+def normalize_modalities(
+    raw: Any, kind: str, supports: Any, which: str
+) -> list[str]:
+    """校验并归一化一条模型的输入/输出模态。
+
+    超出该类目可选范围的取值会被丢掉（例如图像模型写了 video）；
+    一个都不剩时回退到默认值 —— 宁可给个能用的标签，也不要存一个空列表，
+    空列表会让 agent 以为"这个模型不支持任何输入"。
+    """
+    allowed = MODALITY_OPTIONS.get(kind) or MODALITY_OPTIONS["image"]
+    values = _as_modality_list(raw)
+    if not values:
+        return default_modalities(kind, supports, which)
+    picked: list[str] = []
+    for value in values:
+        if value in allowed and value not in picked:
+            picked.append(value)
+    if not picked:
+        return default_modalities(kind, supports, which)
+    # 按固定顺序输出（text → image → video → audio），存盘和界面都稳定：
+    # 否则"先点图片再点文本"和反过来会写出两种不同的 YAML。
+    return [v for v in allowed if v in picked]
+
+
+def invalid_modalities(raw: Any, kind: str) -> list[str]:
+    """返回 raw 里那些**该类目不接受**的取值，用于给用户一条明确的告警。"""
+    allowed = MODALITY_OPTIONS.get(kind) or MODALITY_OPTIONS["image"]
+    values = _as_modality_list(raw) or []
+    return [v for v in values if v not in allowed]
+
+
+def normalize_strategy(
+    raw: Any, key: str, warnings: list[str] | None = None
+) -> str:
+    """把配置里的 strategy 归一成唯一支持的那一种。
+
+    weight_only / fallback_chain 已下线：不报错（否则整份配置打不开），
+    改成统一策略并说清楚为什么，把老配置平滑带过来。
+    """
+    strategy = str(raw or "priority_then_weight").strip()
+    if strategy in VALID_STRATEGIES:
+        return strategy
+    if warnings is not None:
+        warnings.append(
+            f"{key}.strategy={strategy!r} 已不再支持（现在只有 priority_then_weight："
+            f"先按优先级分档、同档按权重分流），已按它处理。"
+            f"把配置里的 strategy 删掉或改成 priority_then_weight 即可消除这条提示。"
+        )
+    return "priority_then_weight"
+
+
+def _spec_modalities(
+    entry: dict[str, Any],
+    kind: str,
+    supports: list[str],
+    model_id: Any,
+    warnings: list[str],
+) -> tuple[list[str], list[str]]:
+    """从一条配置里取出 (输入模态, 输出模态)。
+
+    缺省时按类目 + supports 推默认值；写错只告警不报错 —— 这是标注字段，
+    不该因为一个拼错就让整份配置打不开，但也不能默默当成没写。
+    内置兜底不走这里（调用方按 provider 判断），它没有模态概念。
+    """
+    picked = {
+        which: normalize_modalities(entry.get(f"{which}_modalities"), kind, supports, which)
+        for which in ("input", "output")
+    }
+    for which, field_name in (("input", "input_modalities"), ("output", "output_modalities")):
+        raw_value = entry.get(field_name)
+        if raw_value is not None and _as_modality_list(raw_value) is None:
+            # 写成数字/映射这种形状：不报错，但要说出来，
+            # 否则用户以为自己写的那行生效了。
+            warnings.append(
+                f"模型 {model_id} 的 {field_name} 既不是列表也不是逗号分隔的字符串，"
+                f"已按类目默认值处理"
+            )
+            continue
+        bad = invalid_modalities(raw_value, kind)
+        if bad:
+            warnings.append(
+                f"模型 {model_id} 的 {field_name} 含该类目不支持的取值"
+                f"（{'、'.join(bad)}），已忽略；"
+                f"{kind} 类目可选：{'、'.join(MODALITY_OPTIONS.get(kind, ()))}"
+            )
+    return picked["input"], picked["output"]
 
 
 class ConfigError(RuntimeError):
@@ -69,7 +242,16 @@ def _load_structured(path: Path) -> Any:
     而不是 kind=internal，用户一眼就知道是自己的配置问题。
     """
     suffix = path.suffix.lower()
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        # 用记事本/Excel 另存过的文件经常是 GBK：直接 read_text 会抛
+        # UnicodeDecodeError，那不是 ConfigError，CLI 只会报"内部错误"。
+        raise ConfigError(
+            f"{path.name} 不是 UTF-8 编码（{exc}）。请用编辑器另存为 UTF-8 再试"
+        ) from exc
+    except OSError as exc:
+        raise ConfigError(f"{path.name} 读取失败：{exc}") from exc
     if not text.strip():
         # 空文件 = "什么都没配"，不是解析错误。三条路原来的答案各不相同：
         # json.loads("") 抛异常、PyYAML 给 None、miniyaml 给 {} ——
@@ -147,6 +329,10 @@ class ModelSpec:
     weight: float = 1.0
     enabled: bool = True
     supports: list[str] = field(default_factory=list)
+    #: 功能标签：这个模型吃什么、吐什么。只用于"让人/agent 看清能力"，
+    #: 不参与路由过滤（过滤仍看 supports，保持既有行为不变）。
+    input_modalities: list[str] = field(default_factory=list)
+    output_modalities: list[str] = field(default_factory=list)
     api_key_env: str = ""
     endpoint: str = ""
     params: dict[str, Any] = field(default_factory=dict)
@@ -179,6 +365,16 @@ class ModelSpec:
             "weight": self.weight,
             "enabled": self.enabled,
             "supports": self.supports,
+            # 中英文都给：agent 用英文字段判断，汇报时直接用中文标签，
+            # 不用自己维护一份 text→文本 的映射。
+            "input_modalities": self.input_modalities,
+            "output_modalities": self.output_modalities,
+            "input_modalities_text": [
+                MODALITY_LABELS.get(m, m) for m in self.input_modalities
+            ],
+            "output_modalities_text": [
+                MODALITY_LABELS.get(m, m) for m in self.output_modalities
+            ],
             "endpoint": self.endpoint,
         }
 
@@ -242,7 +438,13 @@ class RouterConfig:
         return self.pools[kind]
 
     def kinds(self) -> list[str]:
-        return sorted(self.pools)
+        """类目列表，按 image → video → audio 的固定顺序排，再补自定义类目。
+
+        原来是 sorted()，加了语音池之后 CLI 的 list 会变成 audio 打头，
+        和页面页签、和 models.yaml 的书写顺序都对不上。
+        """
+        ordered = [k for k in MODEL_KINDS if k in self.pools]
+        return ordered + [k for k in sorted(self.pools) if k not in ordered]
 
     def find_model(self, model_id: str) -> ModelSpec:
         """按 id 取**已配置**的模型。
@@ -275,12 +477,28 @@ class RouterConfig:
     # ---------- 密钥 ----------
 
     def resolve_api_key(self, spec: ModelSpec) -> tuple[str, str]:
-        """返回 (key, 来源说明)。找不到时返回 ("", 原因)。"""
-        inline = spec.options.get("api_key") or spec.raw.get("api_key")
-        if inline:
-            return str(inline), "models.yaml 内联字段"
+        """返回 (key, 来源说明)。找不到时返回 ("", 原因)。
+
+        优先级（与 README「密钥放哪」一致）：
+        环境变量 → ``secrets`` 的 ``keys.<api_key_env>`` → ``keys.<模型 id>``
+        → 条目里的内联 ``api_key``（**最后**）。
+        内联值排最后是刻意的：它写在要提交进版本库的 models.yaml 里，轮换密钥时
+        改环境变量却不生效、还静默用旧 Key 打旧账号，是最难查的一类问题。
+
+        可灵例外（在通用顺序之前）：``options.access_key/secret_key`` 及其
+        ``*_env`` 版本也是文档支持的凭据形式，适配器 ``_kling_authorization``
+        同样认。这里必须一起认，否则模型在路由阶段就被当成「缺 Key」跳过了。
+        """
+        if spec.provider in ("kling", "keling"):
+            pair = self.kling_option_credentials(spec)
+            if pair:
+                return pair
 
         secrets_keys = (self.secrets or {}).get("keys") or {}
+        if not isinstance(secrets_keys, dict):
+            # 密钥文件被手改成 `keys: xxx` 这种形状时，别在后面炸成 TypeError；
+            # load_secrets 已经会告警，这里按"没有密钥"处理。
+            secrets_keys = {}
 
         if spec.api_key_env:
             env_val = os.environ.get(spec.api_key_env)
@@ -296,8 +514,37 @@ class RouterConfig:
         if spec.id in secrets_keys and secrets_keys[spec.id]:
             return str(secrets_keys[spec.id]).strip(), f"secrets 文件 [{spec.id}]"
 
+        # 内联密钥是最后一档：文件里能写、但优先级最低
+        inline = spec.options.get("api_key") or spec.raw.get("api_key")
+        if inline:
+            return str(inline), "models.yaml 内联字段"
+
         hint = spec.api_key_env or f"{spec.id}"
         return "", f"未找到密钥：请设置环境变量 {hint}，或在 config/secrets.yaml 的 keys 下填写 {hint}"
+
+    def kling_option_credentials(self, spec: ModelSpec) -> tuple[str, str] | None:
+        """可灵的 ``options.access_key/secret_key``（或 ``*_env``）凭据。
+
+        返回 ``("AK:SK", 来源)``；没配就返回 None。合并成 ``AK:SK`` 是为了让上游
+        只需要一个字符串 —— ``_kling_authorization`` 本来就认这个形状，
+        ``ctx.api_key`` 里有没有它都不影响鉴权结果。
+        """
+        options = spec.options if isinstance(spec.options, dict) else {}
+        ak = str(options.get("access_key") or "").strip()
+        sk = str(options.get("secret_key") or "").strip()
+        if ak and sk:
+            return f"{ak}:{sk}", "options.access_key/secret_key"
+
+        env_ak = str(options.get("access_key_env") or "").strip()
+        env_sk = str(options.get("secret_key_env") or "").strip()
+        if env_ak and env_sk:
+            keys = (self.secrets or {}).get("keys") or {}
+            keys = keys if isinstance(keys, dict) else {}
+            ak_val = (os.environ.get(env_ak) or keys.get(env_ak) or "").strip()
+            sk_val = (os.environ.get(env_sk) or keys.get(env_sk) or "").strip()
+            if ak_val and sk_val:
+                return f"{ak_val}:{sk_val}", f"环境变量/secrets {env_ak} + {env_sk}"
+        return None
 
     # ---------- 导出 ----------
 
@@ -389,6 +636,13 @@ def _coerce_spec(
     options.update(raw_options or {})
     if entry.get("api_key"):
         options["api_key"] = entry["api_key"]
+        # 内联密钥是唯一躲得过 .gitignore 的那种：models.yaml 本身是要提交/分享的文件
+        # （示例、团队拷贝都靠它），密钥写在这里就会跟着进版本库。
+        # 不拦（老配置可能确实这么写），但必须喊一声。
+        warnings.append(
+            f"模型 {model_id} 把 api_key 直接写在了配置里。models.yaml 是要提交进版本库的文件，"
+            "密钥会跟着一起被提交；建议改成 api_key_env 指向环境变量，密钥放到 secrets.yaml"
+        )
 
     raw_params = entry.get("params")
     if raw_params is not None and not isinstance(raw_params, dict):
@@ -421,6 +675,8 @@ def _coerce_spec(
         "weight",
         "enabled",
         "supports",
+        "input_modalities",
+        "output_modalities",
         "api_key_env",
         "endpoint",
         "params",
@@ -429,6 +685,30 @@ def _coerce_spec(
         "note",
         "description",
     }
+
+    # 输入/输出模态：功能标签，缺省时按类目 + supports 推默认值。
+    # 内置兜底（provider: native）没有模态可言 —— 它不调任何接口，只是把请求
+    # 交回给 AI 助手自己的出图/出视频工具。给它算默认值会得出「输入 文本/图片 →
+    # 输出 图片」这种看着像真实模型的标签，跟真模型挤在一起只会误导人。
+    if provider == "native":
+        input_modalities: list[str] = []
+        output_modalities: list[str] = []
+        # 手写层里真的给兜底写了模态：忽略，但要留一句话 ——
+        # 静默丢掉用户写的配置，比报错更让人困惑。
+        explicit = [
+            name
+            for name in ("input_modalities", "output_modalities")
+            if entry.get(name) not in (None, "", [], ())
+        ]
+        if explicit:
+            warnings.append(
+                f"模型 {model_id} 是内置兜底（provider: native），"
+                f"{'、'.join(explicit)} 对它没有意义，已忽略"
+            )
+    else:
+        input_modalities, output_modalities = _spec_modalities(
+            entry, kind, supports, model_id, warnings
+        )
 
     try:
         priority = int(entry.get("priority", 1))
@@ -454,6 +734,8 @@ def _coerce_spec(
         weight=weight,
         enabled=coerce_enabled(entry.get("enabled", True)),
         supports=supports,
+        input_modalities=input_modalities,
+        output_modalities=output_modalities,
         api_key_env=api_key_env,
         endpoint=endpoint,
         params=dict(raw_params or {}),
@@ -635,10 +917,13 @@ _is_tombstone = is_tombstone  # 兼容包内旧写法
 
 
 def _dedupe_last(items: list[Any]) -> list[Any]:
-    """同 id 时保留**最后一次**定义的内容，但保持**首次出现**的位置。
+    """同 id 时把两层的字段**合并**：后出现的字段胜出，缺的字段沿用先出现的。
 
     这样 models.yaml 里手写的模型排在前面、配置页面新增的排在后面，
-    而配置页面又能覆盖同 id 的手写条目。
+    而配置页面又能覆盖同 id 的手写条目 —— 但它没提交的字段（比如手写的
+    ``endpoint`` / ``options``）不会被一个只有半截字段的覆盖条目顶掉。
+    早期是整条替换：页面上改一下优先级，模型级 endpoint 就静默丢了，
+    请求改道去了厂商默认地址。
 
     带 ``_deleted: true`` 的条目是**墓碑**：配置页面要删掉一条写在 models.yaml
     里的模型，但它不能去改用户手写的文件，于是在叠加层里放一条同 id 的墓碑把
@@ -662,7 +947,16 @@ def _dedupe_last(items: list[Any]) -> list[Any]:
             continue
         if key not in by_id:
             order.append(("id", key))
-        by_id[key] = entry
+        previous = by_id.get(key)
+        if previous is None:
+            by_id[key] = entry
+        elif is_tombstone(entry):
+            # 后一条是墓碑：整条盖掉，不再合并
+            by_id[key] = entry
+        else:
+            merged = {k: v for k, v in previous.items() if k != TOMBSTONE_KEY}
+            merged.update(entry)
+            by_id[key] = merged
     out: list[Any] = []
     for kind, item in order:
         if kind == "raw":
@@ -673,7 +967,7 @@ def _dedupe_last(items: list[Any]) -> list[Any]:
 
 
 def visible_entries(entries: list[Any]) -> list[Any]:
-    """按加载语义整理一个模型列表：同 id 取后者、丢掉墓碑。
+    """按加载语义整理一个模型列表：同 id 字段级合并、丢掉墓碑。
 
     配置页面用它保证"页面上看到的"就是"运行时真正用的" ——
     少了这一步，同一条模型会显示两遍（手写层一遍、覆盖层一遍），
@@ -682,11 +976,14 @@ def visible_entries(entries: list[Any]) -> list[Any]:
     return _dedupe_last(entries)
 
 
-def base_layer() -> dict[str, Any]:
+def base_layer(soft: bool = False) -> dict[str, Any]:
     """只读**手写层**（models.yaml / models.json）的原始数据，不含叠加层。
 
     配置页面需要它来回答两个问题：这条模型是用户手写的还是在页面里建的？
     删掉手写层的模型要写墓碑，删掉页面里的模型直接摘掉就行。
+
+    ``soft=True`` 时解析失败不抛错、按空层处理 —— 配置页面靠它在这种状态下
+    还能打开（哪怕是空列表），而不是被自己配置里的一个缩进错误挡在门外。
     """
     override = os.environ.get("MEDIA_ROUTER_CONFIG")
     if override:
@@ -695,13 +992,21 @@ def base_layer() -> dict[str, Any]:
             candidate = (Path.cwd() / candidate).resolve()
         if not candidate.exists():
             return {}
-        layer = _load_structured(candidate)
-        return layer if isinstance(layer, dict) else {}
+        return _base_layer_from(candidate, soft)
 
     base = _first_existing(("models.yaml", "models.yml", "models.json"))
     if base is None:
         return {}
-    layer = _load_structured(base)
+    return _base_layer_from(base, soft)
+
+
+def _base_layer_from(path: Path, soft: bool) -> dict[str, Any]:
+    try:
+        layer = _load_structured(path)
+    except (ConfigError, OSError):
+        if soft:
+            return {}
+        raise
     return layer if isinstance(layer, dict) else {}
 
 
@@ -869,7 +1174,19 @@ def load_secrets(warnings: list[str] | None = None) -> dict[str, Any]:
         if not isinstance(loaded, dict):
             continue
         for key, value in loaded.items():
-            if key == "keys" and isinstance(value, dict):
+            if key == "keys":
+                # keys 必须是映射。写成 `keys:`（空）/ `keys: ARK_API_KEY` 时，
+                # 早期会走 else 分支把 merged["keys"] 整个覆盖掉 ——
+                # 轻的后果是另一份文件里的真实密钥被静默清空（与 README 的
+                # 「空值不覆盖非空值」相反），重的后果是 resolve_api_key 对字符串
+                # 取下标、抛 TypeError（CLI 只会说"内部错误"）。
+                if not isinstance(value, dict):
+                    if warnings is not None:
+                        warnings.append(
+                            f"{path.name} 的 keys 必须是映射（key: value），已忽略该文件的 keys 段；"
+                            f"正确写法：keys:\\n  ARK_API_KEY: \"你的密钥\""
+                        )
+                    continue
                 bucket = merged.setdefault("keys", {})
                 for k, v in value.items():
                     if v is None or str(v).strip() == "":
@@ -908,6 +1225,37 @@ def load_raw(allow_missing: bool = False) -> tuple[dict[str, Any], list[Path], P
             )
         data = _merge_config(data, layer)
     return data, paths, overlay_path
+
+
+def load_raw_tolerant(
+    allow_missing: bool = True,
+) -> tuple[dict[str, Any], list[Path], Path | None, list[str]]:
+    """和 :func:`load_raw` 一样做叠加，但**坏掉的文件跳过**，其它层照常加载。
+
+    配置页面的容错入口。手写层写坏时，叠加层里页面自己建的模型依然看得见；
+    反过来叠加层写坏时，手写的模型也还在。坏掉的那份以 warning 的形式告诉用户
+    该改哪个文件，而不是把整页数据一起丢掉、让人以为模型全没了。
+    """
+    paths, overlay_path = _config_paths(allow_missing=allow_missing)
+    data: dict[str, Any] = {}
+    warnings: list[str] = []
+    for path in paths:
+        try:
+            layer = _load_structured(path)
+        except (ConfigError, OSError, UnicodeDecodeError) as exc:
+            warnings.append(f"{path.name} 读取失败，已跳过：{exc}")
+            continue
+        if not isinstance(layer, dict):
+            warnings.append(f"{path.name} 顶层必须是映射（key: value），已跳过该文件")
+            continue
+        raw_defaults = layer.get("defaults")
+        if raw_defaults is not None and not isinstance(raw_defaults, dict):
+            warnings.append(
+                f"{path.name} 的顶层 defaults 必须是映射（key: value），已跳过该文件"
+            )
+            continue
+        data = _merge_config(data, layer)
+    return data, paths, overlay_path, warnings
 
 
 def lint_files(paths: list[Path] | None = None, overlay: Path | None = None) -> list[str]:
@@ -990,12 +1338,7 @@ def load_config() -> RouterConfig:
         entries = value.get("models") or []
         if not isinstance(entries, list):
             raise ConfigError(f"{key}.models 必须是列表")
-        strategy = str(value.get("strategy") or "priority_then_weight").strip()
-        if strategy not in VALID_STRATEGIES:
-            warnings.append(
-                f"{key}.strategy={strategy!r} 不在 {VALID_STRATEGIES} 中，已回退为 priority_then_weight"
-            )
-            strategy = "priority_then_weight"
+        strategy = normalize_strategy(value.get("strategy"), key, warnings)
         specs = [
             _coerce_spec(key, entry, idx, warnings, vendors)
             for idx, entry in enumerate(_dedupe_last(entries))

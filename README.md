@@ -300,13 +300,23 @@ python3 scripts/selftest_web.py  # 网页配置全链路
 ```
 
 两个脚本**都不需要任何 API Key**，全绿就说明这套代码在你的环境里可用
-（Windows 中文环境、Python 3.13 实测：`173/173`、`244/244`）。
+（Windows 中文环境、Python 3.13 实测：`188/188`、`261/261`）。
+`selftest_web.py` 里有一项会真的向厂商只读端点发一次请求；完全离线的机器上它会失败，
+其余用例都只打本地回环。
 
-另有 3 个低成本测试，不启浏览器、不写仓库 `dist`：
+另有 11 个低成本测试，不启浏览器、不写仓库 `dist`：
 
 ```bash
 node tests/test_page_render.js       # 页面 JS 渲染（假 DOM，零依赖，需要 Node）
 python3 tests/test_page_static.py    # 阻塞弹窗 / 关键结构静态扫描
+python3 tests/test_modalities.py     # 输入/输出模态字段的归一化与落盘往返
+python3 tests/test_strategy.py       # 路由策略收敛（旧策略被纠正 + 分档排序）
+python3 tests/test_mp4_meta.py       # 视频元数据解析（moov 头/尾、tkhd）
+python3 tests/test_audio.py          # 四条语音通路的请求体与响应解析
+python3 tests/test_p0_fixes.py       # 计费安全 / 密钥 / 叠加层合并的回归
+python3 tests/test_p1_fixes.py       # 页面容错 / 冷却排序 / --count / 密钥文件的回归
+python3 tests/test_param_fixes.py    # --param 在各适配器的透传
+python3 tests/test_real_fixes.py     # 真跑后修复：URL 签名 / WAV 头 / caption / 进度
 python3 tests/test_build_runtime.py  # 运行时包冒烟（写临时目录）
 ```
 
@@ -336,10 +346,101 @@ image:
       weight: 50                     # 同档内的权重
       enabled: true
       supports: [text2img]           # 能力标签
+      input_modalities: [text]       # 功能标签：能接受什么（text/image/video/audio）
+      output_modalities: [image]     # 功能标签：能产出什么
       api_key_env: ARK_API_KEY       # 从哪个环境变量读 Key
       params:                        # 固定透传给接口的参数
         size: 1024x1024
 ```
+
+### 输入 / 输出模态（input_modalities / output_modalities）
+
+给模型贴的功能标签，作用是**让 agent 一眼看清这个模型能干什么**，而不是靠猜模型名。
+配置页面的「添加模型」里是两组可多选的标签按钮，图像模型只给「文本 / 图片」，
+视频模型四种都给：
+
+| 类目 | 输入模态可选 | 输出模态可选 |
+|---|---|---|
+| `image` | 文本、图片 | 文本、图片 |
+| `video` | 文本、图片、视频、音频 | 文本、图片、视频、音频 |
+| `audio` | 文本、音频 | 文本、音频 |
+
+- 存盘用英文键 `text` / `image` / `video` / `audio`；写中文（`图片`）也能读。
+- 不写就按类目推默认值：图像「文本→图片」，视频「文本→视频」；`supports` 里有
+  `img2img` / `img2video` 时输入自动加「图片」。所以老配置不用改。
+- 内置兜底（`provider: native`，如 `builtin-imagen`）**不带**这两个标签：它不调任何
+  接口，只是把请求交回给 agent 自己的出图/出视频工具，标成「入 文本·图片 → 出 图片」
+  会让人误以为它是个真模型。
+- 这是**标注**，不参与路由过滤（过滤仍然看 `supports`）。`list` / `resolve` 的输出里
+  同时给英文键和 `input_modalities_text` / `output_modalities_text` 中文标签。
+
+### 三个类目与语音模型池
+
+配置页面「模型配置」下有 `图像模型 / 视频模型 / 语音模型` 三个页签，对应
+`models.yaml` 里 `image` / `video` / `audio` 三个顶层键。语音模型池默认是空的：
+
+```yaml
+audio:
+  strategy: priority_then_weight
+  models: []
+    # - id: my-tts
+    #   provider: openai            # 或 generic_http 接任意 REST
+    #   model: tts-1
+    #   priority: 1
+    #   weight: 50
+    #   supports: [text2audio]      # 语音克隆再加 audio2audio
+    #   input_modalities: [text]
+    #   output_modalities: [audio]  # ASR 模型反过来写 text
+    #   api_key_env: OPENAI_API_KEY
+    #   params:
+    #     voice: alloy              # 音色
+    #     speed: 1.0                # 语速
+```
+
+> **语音已经能真生成了**：接了 `dashscope`、`openai`、`kling`、`volcengine` 四条通路。
+> 智谱 BigModel 和硅基流动本身就是 OpenAI 协议，跟着 `openai` 这条一起可用
+> （智谱的模型名是 `glm-tts`，硅基是 `FunAudioLLM/CosyVoice2-0.5B` 之类）。
+>
+> ```bash
+> python3 scripts/media_router.py generate --kind audio --prompt "你好，欢迎使用。"
+> ```
+>
+> | 平台 | 模型 / 音色 | 端点 | 形态 | 备注 |
+> |---|---|---|---|---|
+> | 百炼 | `qwen-audio-3.1-tts-*`、`cosyvoice-*` | `/services/audio/tts/SpeechSynthesizer` | 同步 | 主用 `text_prompt`，同时送 `text` |
+> | 百炼 | `qwen3-tts-*` | `/services/aigc/multimodal-generation/generation` | 同步 | 入参用 `text` |
+> | OpenAI 兼容 | `tts-1`、`gpt-4o-mini-tts` 等 | `/v1/audio/speech` | 同步 | 直接回二进制 |
+> | 可灵 | 音色用 `params.voice_id`（**必填**） | `/audio/tts` | **异步任务** | 提交 → 轮询 `task_result.audios[]`；`voice_language` 不填默认 `zh` |
+> | 火山（豆包语音） | 音色用 `params.speaker`（**必填**） | `openspeech.bytedance.com/api/v3/tts/unidirectional` | 同步流式 | 返回是 base64 音频片段流；要带 `X-Api-Resource-Id`（默认 `seed-tts-2.0`） |
+>
+> **两套百炼端点互不通用**（拿 qwen-audio 撞多模态端点会得到
+> `url error, please check url`），适配器按模型名自动分派。`voice` / `format` /
+> `sample_rate` 都可以不填：实测最小请求体就能返回 wav，硬编码音色反而换个模型就 400。
+> 音色、语速这些写进模型的 `params` 即可透传。
+>
+> 可灵的 TTS 请求体里**没有 model_name**（音色靠 `voice_id` 选，且**必填**，缺了会得到
+> `1201 voiceId: must not be blank`）；个别网关若要 model_name，写进 `params.model_name` 透传即可。
+>
+> `/audio/speech` 这条协议的**默认值各家不一样**，而且参数校验发生在计费之前 ——
+> 传错会直接 400「音色不存在」/「不支持当前 response_format 值」。适配器按域名取默认值：
+>
+> | 域名 | 默认音色 | 默认格式 |
+> |---|---|---|
+> | `open.bigmodel.cn`（智谱） | `tongtong` | `wav`（它**只收** wav / pcm，mp3 会 400） |
+> | `api.siliconflow.cn`（硅基） | `<模型名>:alex` | `mp3` |
+> | 其他（OpenAI 官方、各种中转） | `alloy` | `mp3` |
+>
+> 想换就写 `params.voice` / `params.response_format`，显式值永远优先。
+> 鉴权上，新版控制台的**单个 API Key**（`api-key-kling-…`）直接当 Bearer 用，旧版
+> `AccessKey:SecretKey` 仍然支持 —— 适配器按有没有英文冒号自动区分，两者共用同一把配置项。
+>
+> 火山的语音**不在方舟下面**：域名是 `openspeech.bytedance.com`，鉴权是 `X-Api-Key`
+> （旧版 `appid:token` 拆成 `X-Api-App-Id` / `X-Api-Access-Key`）外加必填的
+> `X-Api-Resource-Id`；返回也不是 URL，而是一串 JSON、每段 `data` 是 base64 音频片段。
+> 语音的 Key 和 `ARK_API_KEY` 不通用，建议在配置页单独加一个厂商条目。
+>
+> replicate、fal 的 TTS 协议各不相同，暂未接入 —— 配上去会明确报
+> 「该类目还没有接入适配器」，不会静默拿图像接口去打。
 
 ### priority 与 weight 的实际含义
 
@@ -361,13 +462,16 @@ image:
 - 想让 A 永远优先、B 只是备胎 → 给它们**不同**的 priority
 - 想让 A、B 按 5:3 分摊流量 → 给它们**相同**的 priority，weight 设 50 和 30
 
-### 三种 strategy
+### 路由策略只有一种
 
-| 取值 | 行为 | 适合 |
-|---|---|---|
-| `priority_then_weight` | 先分档，同档内加权随机（默认） | 图片等单价低、想分摊用量的场景 |
-| `weight_only` | 忽略 priority，全部按 weight 加权随机 | 就是想让多个模型纯分流 |
-| `fallback_chain` | 严格按 (priority, weight) 排序，不随机 | 视频这类贵且要求结果可预测的场景 |
+`strategy` 字段保留在配置里，但**只剩 `priority_then_weight`**：先按 `priority` 分档，
+只在最小那一档里按 `weight` 加权随机，更高档（数字更大）全部是备用。
+
+> 早期的 `weight_only`（忽略优先级、全局按权重分流）和 `fallback_chain`（严格顺位、
+> 不随机）已下线。前者等于让备用模型跟主用模型抢流量，和 `priority` 的语义打架；
+> 后者是另一套心智模型。老配置里如果还写着这两个值，加载时会告警并**按
+> `priority_then_weight` 处理**，不会导致配置打不开；把 `strategy:` 删掉或改成
+> `priority_then_weight` 即可消除告警。
 
 ### 密钥放哪
 
@@ -432,8 +536,8 @@ PyYAML 的正则，并且在自检里**逐字节比对两条解析路径**解析
 | 取值 | 行为 |
 |---|---|
 | `off` | 只给文件路径 |
-| `metadata` | 额外给宽高/时长/大小（默认，零成本） |
-| `vlm` | **再调一次视觉模型产出一句话描述**，填 `caption.model`、`caption.endpoint` 与 `caption.api_key_env` 即可 |
+| `metadata` | 给一句结构化描述（尺寸 / 时长 / 格式 / 大小）+ `files[]` 里的详细档案（默认，零成本） |
+| `vlm` | **再调一次视觉模型产出一句话画面描述**，填 `caption.model`、`caption.endpoint` 与 `caption.api_key_env` 即可 |
 
 为什么建议开 `vlm`：文本模型看不见图片，如果只拿到一个路径，它要么继续卡着、要么只好瞎猜画面。
 给一句真实描述，它就能接着写文案、做汇报、往下推理。视频用 ffmpeg 抽一帧再送视觉模型
@@ -500,6 +604,7 @@ PyYAML 的正则，并且在自检里**逐字节比对两条解析路径**解析
 media-router/
 ├── SKILL.md                  # 给 agent 的执行规范（核心）
 ├── README.md                 # 本文件
+├── CHANGELOG.md              # 用户可见的行为变化（新增能力 / 修掉的坑 / 口径调整）
 ├── assets/config.html        # 网页配置界面（单文件，零依赖）
 ├── config/
 │   ├── models.yaml           # ★ 你维护的模型池
@@ -526,11 +631,11 @@ media-router/
 │       ├── cli.py            # 命令行
 │       └── miniyaml.py       # YAML 子集解析与序列化（没装 pyyaml 时的回退）
 ├── state/health.json         # 运行时熔断状态（首次运行时自动生成）
-├── outputs/                  # 产物默认落盘位置：运行命令时的当前工作目录下（不一定是这里）
+├── outputs/                  # 产物默认落盘位置（<cwd>/outputs/image、<cwd>/outputs/video）
 ├── references/
 │   ├── providers.md          # 各平台接入参数对照
 │   └── setup.md              # 配置/排障说明（按需读，正常生成不需要）
-├── tests/                    # 3 个低成本测试（仅开发用，不进运行时包）
+├── tests/                    # 11 个低成本测试（仅开发用，不进运行时包）
 ├── tools/build_pack.py       # 打包：--runtime 生成干净运行时目录，默认生成市场 pack
 ├── pack/manifest.json        # DSH 插件市场上架元数据
 └── dist/                     # 打包产物（不入库）
@@ -583,10 +688,12 @@ media-router/
 **Q：产物存在哪？**
 
 默认**运行命令时的当前工作目录**下的 `./outputs/`（不是 skill 目录 —— 很多 agent 沙箱把 skill
-目录设成只读，落在 cwd 你才拿得到），文件名形如 `image_jimeng-seedream_20260916_221630412_01.png`
-（毫秒级时间戳 + 序号，不会互相覆盖）。改目录的优先级：`--output-dir`（本次命令）
+目录设成只读，落在 cwd 你才拿得到），并**按类目再分一层**：图片进 `outputs/image/`，
+视频进 `outputs/video/`。文件名形如 `image_jimeng-seedream_20260916_221630412_01.png`
+（时间戳 + 序号，不会互相覆盖）。改目录的优先级：`--output-dir`（本次命令）
 > `models.yaml` 的 `defaults.output_dir`（默认值，出厂是 `null`）> `MEDIA_ROUTER_OUTPUT_DIR`
-> 环境变量 > 当前工作目录 `./outputs`。
+> 环境变量 > 当前工作目录 `./outputs`。上面这几种来源指的都是**根目录**，
+> 实际落盘路径是 `<根目录>/image/` 或 `<根目录>/video/`。
 
 **Q：能不能不让 agent 自己动我的配置？**
 

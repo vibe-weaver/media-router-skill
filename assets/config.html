@@ -6,142 +6,275 @@
 <title>media-router 配置页面</title>
 <style>
 :root{
-  --bg:#f7f8fa; --card:#ffffff; --line:#e6e8ec; --line-strong:#d5d9e0;
-  --text:#1f2328; --muted:#667085; --faint:#98a2b3;
-  --accent:#2563eb; --accent-soft:#eff4ff; --accent-line:#c7d7fe;
-  --ok:#0f7b52; --ok-soft:#e8f6f0;
-  --warn:#9a6700; --warn-soft:#fdf6e3;
-  --err:#b42318; --err-soft:#fdeceb;
-  --radius:10px;
+  /* 颜色：底色压深一点，白卡片才浮得起来 */
+  --bg:#e9edf4; --card:#ffffff; --line:#e2e7f0; --line-strong:#ccd4e2;
+  --text:#141922; --muted:#5a6678; --faint:#8b96a8;
+  --accent:#2563eb; --accent-2:#1a4fd0; --accent-soft:#e9f1ff; --accent-line:#bcd2fe;
+  --ok:#0b6b47; --ok-soft:#e3f6ed;
+  --warn:#8a5a00; --warn-soft:#fdf2d8;
+  --err:#a81c11; --err-soft:#fdeae8;
+  --radius:16px;
+  /* 3D 深度：每层都是「接触阴影 + 环境阴影 + 大范围柔光」叠出来的。
+     单层阴影永远软塌塌的，三层叠加才有实物感。 */
+  --sh-xs:0 1px 2px rgba(20,25,34,.07), 0 1px 1px rgba(20,25,34,.05);
+  --sh-sm:0 1px 2px rgba(20,25,34,.07), 0 3px 8px -2px rgba(20,25,34,.10);
+  --sh-md:0 1px 2px rgba(20,25,34,.05), 0 6px 16px -4px rgba(20,25,34,.12),
+         0 14px 32px -16px rgba(20,25,34,.18);
+  --sh-lg:0 2px 4px rgba(20,25,34,.06), 0 12px 28px -6px rgba(20,25,34,.16),
+         0 28px 60px -28px rgba(20,25,34,.24);
+  /* 凹槽：上缘暗、下缘亮，才像"刻进去"而不是"画上去" */
+  --sh-inset:inset 0 2px 4px rgba(20,25,34,.11), inset 0 -1px 0 rgba(255,255,255,.85);
+  --hi:inset 0 1px 0 rgba(255,255,255,.92);
+  --grad-card:linear-gradient(180deg,#ffffff 0%,#f8faff 100%);
+  --grad-btn:linear-gradient(180deg,#ffffff 0%,#eef2f9 100%);
+  --grad-accent:linear-gradient(180deg,#5b8dff 0%,#2f6bf0 48%,#1c4dcc 100%);
 }
 *{box-sizing:border-box}
 body{
-  margin:0; background:var(--bg); color:var(--text);
+  margin:0; color:var(--text);
+  /* 顶部一道柔光 + 整体冷灰渐变，给卡片一个"打光"的环境 */
+  background:
+    radial-gradient(1100px 520px at 50% -10%, #ffffff 0%, rgba(255,255,255,0) 60%),
+    linear-gradient(180deg,#eef2f8 0%,#e5eaf3 100%);
+  background-attachment:fixed;
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
-  font-size:14px; line-height:1.6;
+  font-size:15.5px; line-height:1.65;
+  -webkit-font-smoothing:antialiased;
 }
-.wrap{max-width:960px; margin:0 auto; padding:32px 20px 80px}
-h1{font-size:20px; font-weight:600; margin:0 0 4px}
-h2{font-size:15px; font-weight:600; margin:0 0 10px}
-h3{font-size:13.5px; font-weight:600; margin:0 0 8px; color:var(--text)}
-p{margin:0 0 10px}
-.sub{color:var(--muted); font-size:13px}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Courier New",monospace; font-size:12px}
-header{margin-bottom:22px}
+.wrap{max-width:1000px; margin:0 auto; padding:36px 22px 90px}
+/* 标题统一加大加粗，层级靠字号和字重拉开 */
+h1{font-size:27px; font-weight:800; letter-spacing:-.02em; margin:0 0 6px; text-shadow:0 1px 0 #fff}
+h2{font-size:19px; font-weight:700; letter-spacing:-.01em; margin:0 0 12px}
+h3{font-size:15.5px; font-weight:700; margin:0 0 9px; color:var(--text)}
+p{margin:0 0 12px}
+.sub{color:var(--muted); font-size:14.5px; font-weight:500}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Courier New",monospace;
+  font-size:13px; font-weight:500}
+header{margin-bottom:24px}
 .head-row{display:flex; align-items:flex-start; justify-content:space-between; gap:16px}
 .head-row h1{margin-bottom:4px}
 .head-row .sub{margin:0}
 @media(max-width:600px){.head-row{flex-direction:column; align-items:flex-start}}
 .pathbar{
-  display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:10px; padding:10px 12px;
-  background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
-  color:var(--muted); font-size:12px;
+  display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:12px; padding:12px 14px;
+  background:var(--grad-card); border:1px solid var(--line); border-radius:var(--radius);
+  color:var(--muted); font-size:13px; box-shadow:var(--sh-sm), var(--hi);
 }
-.pathbar b{color:var(--text); font-weight:500}
-.tabs{display:flex; gap:4px; margin:20px 0 18px; border-bottom:1px solid var(--line); align-items:flex-end}
+.pathbar b{color:var(--text); font-weight:700}
+/* 页签做成"实体分段控件"：轨道是凹的，选中的那块是凸的 */
+.tabs{display:inline-flex; flex-wrap:wrap; gap:4px; margin:22px 0 20px; padding:5px;
+  background:linear-gradient(180deg,#e7ecf5 0%,#eff3fa 100%);
+  border:1px solid #d9e0ec; border-radius:15px;
+  box-shadow:var(--sh-inset), 0 1px 0 #fff}
 .tab{
-  padding:10px 16px; border:0; background:none; cursor:pointer; font-size:15px;
-  font-weight:600; color:var(--muted); border-bottom:3px solid transparent;
-  margin-bottom:-1px; font-family:inherit; border-radius:8px 8px 0 0;
-  box-shadow:none; transition:background .12s, color .12s;
+  padding:10px 24px; border:0; background:transparent; cursor:pointer; font-size:17px;
+  font-weight:700; color:var(--muted); font-family:inherit; border-radius:11px;
+  box-shadow:none; transition:background .15s, color .15s, box-shadow .15s;
 }
-.tab:hover{color:var(--text); background:#f2f4f7}
-.tab:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
-.tab.on{color:var(--accent); border-bottom-color:var(--accent); background:var(--accent-soft)}
+.tab:hover{color:var(--text); background:rgba(255,255,255,.55)}
+.tab:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+.tab.on{color:var(--accent-2); background:linear-gradient(180deg,#ffffff 0%,#f3f8ff 100%);
+  box-shadow:var(--hi), 0 2px 4px rgba(20,25,34,.10), 0 10px 20px -10px rgba(37,99,235,.55)}
 .panel{display:none}
 .panel.on{display:block}
 .card{
-  background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
-  padding:16px; margin-bottom:12px;
+  background:var(--grad-card); border:1px solid #dbe2ee; border-bottom-color:#d2daea;
+  border-radius:var(--radius);
+  padding:22px; margin-bottom:16px;
+  /* 大卡片多一层"接触阴影"，底部才压得住，看起来是真的立在页面上 */
+  box-shadow:var(--sh-md), 0 1px 1px rgba(20,25,34,.06), var(--hi);
 }
-.card.tight{padding:12px 14px}
+.card.tight{padding:14px 16px}
 .row{display:flex; align-items:flex-start; gap:12px; justify-content:space-between}
 .row-mid{align-items:center}
 .grow{flex:1; min-width:0}
+/* 按钮：顶部高光 + 底部接触阴影 = 微微凸起；按下去阴影收进内部，像真被按下 */
 button{
-  font-family:inherit; font-size:13px; font-weight:500; padding:7px 14px; border-radius:8px;
-  cursor:pointer; border:1px solid var(--line-strong); background:#fff; color:var(--text);
-  white-space:nowrap; box-shadow:0 1px 1px rgba(16,24,40,.03);
-  transition:background .12s, border-color .12s, box-shadow .12s;
+  font-family:inherit; font-size:14.5px; font-weight:600; padding:9px 18px; border-radius:11px;
+  cursor:pointer; border:1px solid var(--line-strong); background:var(--grad-btn); color:var(--text);
+  white-space:nowrap;
+  box-shadow:0 1px 0 rgba(255,255,255,.9) inset, 0 1px 2px rgba(20,25,34,.10),
+             0 5px 12px -6px rgba(20,25,34,.22);
+  transition:background .14s, border-color .14s, box-shadow .14s, transform .08s;
 }
-button:hover:not(:disabled){border-color:#aeb6c2; background:#f9fafb}
-button:active:not(:disabled){transform:translateY(1px)}
-button:disabled{opacity:.5; cursor:not-allowed}
+button:hover:not(:disabled){border-color:#b6c0d2;
+  background:linear-gradient(180deg,#ffffff 0%,#f5f8fd 100%);
+  box-shadow:0 1px 0 rgba(255,255,255,.95) inset, 0 2px 4px rgba(20,25,34,.10),
+             0 8px 18px -8px rgba(20,25,34,.26);}
+button:active:not(:disabled){transform:translateY(1px);
+  box-shadow:inset 0 2px 4px rgba(20,25,34,.16), 0 1px 0 rgba(255,255,255,.7);}
+button:disabled{opacity:.5; cursor:not-allowed; box-shadow:var(--sh-xs)}
 button:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
-button.primary{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600;
-  box-shadow:0 1px 2px rgba(37,99,235,.28)}
-button.primary:hover:not(:disabled){background:#1d4ed8; border-color:#1d4ed8; box-shadow:0 2px 5px rgba(37,99,235,.32)}
-button.danger{color:var(--err); border-color:#f2c6c2; background:#fff}
-button.danger:hover:not(:disabled){background:var(--err-soft); border-color:#eaa9a3}
-button.sm{padding:5px 10px; font-size:12.5px; border-color:var(--line-strong);
-  background:#fff; color:var(--text); border-radius:7px; box-shadow:none}
-button.sm:hover:not(:disabled){background:#f2f4f7; border-color:#aeb6c2}
-button.sm.danger{color:var(--err); border-color:#f2c6c2; background:#fff}
-button.sm.danger:hover:not(:disabled){background:var(--err-soft); border-color:#eaa9a3; color:var(--err)}
+button.primary{background:var(--grad-accent); border-color:#2456c9; color:#fff; font-weight:700;
+  text-shadow:0 1px 1px rgba(9,30,80,.28);
+  box-shadow:0 1px 0 rgba(255,255,255,.35) inset, 0 2px 4px rgba(21,52,140,.34),
+             0 10px 22px -10px rgba(37,99,235,.75);}
+button.primary:hover:not(:disabled){border-color:#1f4cbb;
+  background:linear-gradient(180deg,#6d99ff 0%,#3573f4 48%,#1b49c6 100%);
+  box-shadow:0 1px 0 rgba(255,255,255,.4) inset, 0 3px 6px rgba(21,52,140,.34),
+             0 14px 26px -12px rgba(37,99,235,.8);}
+button.danger{color:var(--err); border-color:#eebfb9;
+  background:linear-gradient(180deg,#ffffff 0%,#fdf0ee 100%)}
+button.danger:hover:not(:disabled){background:linear-gradient(180deg,#ffffff,#fbe4e1);
+  border-color:#e2a9a2}
+button.sm{padding:7px 14px; font-size:13.5px; border-radius:9px; font-weight:600;
+  border-color:var(--line-strong); background:var(--grad-btn); color:var(--text);
+  box-shadow:0 1px 0 rgba(255,255,255,.9) inset, 0 1px 2px rgba(20,25,34,.09),
+             0 3px 8px -5px rgba(20,25,34,.22);}
+button.sm:hover:not(:disabled){background:linear-gradient(180deg,#ffffff,#f5f8fd);
+  border-color:#b6c0d2}
+button.sm.danger{color:var(--err); border-color:#eebfb9;
+  background:linear-gradient(180deg,#ffffff 0%,#fdf0ee 100%)}
+button.sm.danger:hover:not(:disabled){background:linear-gradient(180deg,#ffffff,#fbe4e1); color:var(--err)}
+/* 输入控件：内阴影 = 凹槽，看起来像刻进卡片里 */
 input,select,textarea{
-  font-family:inherit; font-size:13px; padding:8px 10px; border:1px solid var(--line-strong);
-  border-radius:8px; background:#fff; color:var(--text); width:100%;
+  font-family:inherit; font-size:15.5px; font-weight:600; padding:10px 13px;
+  border:1px solid #c3ccdc; border-radius:11px;
+  /* 背景给纯白、文字再压深一档：之前 #fcfdff + 较深的内阴影，
+     字是深灰却看着发闷，浅色屏上尤其明显。 */
+  background:#fff; color:#0d1219; width:100%;
+  box-shadow:inset 0 1px 2px rgba(20,25,34,.07);
+  transition:border-color .14s, box-shadow .14s, background .14s;
 }
-input:focus,select:focus{outline:2px solid var(--accent-soft); border-color:var(--accent)}
-input[type=range]{padding:0; border:0; width:100%}
-label.lbl{display:block; font-size:13px; font-weight:500; margin:14px 0 5px}
+/* 等宽字体本来字号更小，输入框里不能跟着缩：模型名正是最该看清的那一栏 */
+input.mono,textarea.mono,select.mono{font-size:14.5px; font-weight:600; letter-spacing:.01em}
+::placeholder{color:#74808f; font-weight:500; opacity:1}
+input:focus,select:focus,textarea:focus{outline:none; border-color:var(--accent); background:#fff;
+  box-shadow:0 0 0 4px rgba(37,99,235,.15), inset 0 2px 4px rgba(20,25,34,.08);}
+input[type=range]{padding:0; border:0; width:100%; background:transparent; box-shadow:none;
+  -webkit-appearance:none; appearance:none; height:26px; cursor:pointer}
+input[type=range]::-webkit-slider-runnable-track{
+  height:10px; border-radius:99px;
+  background:linear-gradient(180deg,#dee5f1 0%,#eef2f9 100%);
+  box-shadow:inset 0 2px 3px rgba(20,25,34,.16), 0 1px 0 #fff;
+}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; appearance:none;
+  width:24px; height:24px; margin-top:-9px; border-radius:50%; cursor:pointer;
+  background:linear-gradient(180deg,#6d99ff 0%,#2f6bf0 55%,#1c4dcc 100%);
+  border:2px solid #fff;
+  box-shadow:0 2px 6px rgba(37,99,235,.5), 0 1px 2px rgba(20,25,34,.28);}
+input[type=range]:focus-visible::-webkit-slider-thumb{
+  box-shadow:0 0 0 5px rgba(37,99,235,.2), 0 2px 6px rgba(37,99,235,.5);}
+input[type=range]::-moz-range-track{
+  height:10px; border-radius:99px; background:#e6ebf4;
+  box-shadow:inset 0 2px 3px rgba(20,25,34,.16);
+}
+input[type=range]::-moz-range-thumb{
+  width:20px; height:20px; border-radius:50%; border:2px solid #fff;
+  background:linear-gradient(180deg,#5b8dff,#1c4dcc);
+  box-shadow:0 2px 6px rgba(37,99,235,.5);
+}
+label.lbl{display:block; font-size:15px; font-weight:700; margin:16px 0 7px}
 label.lbl:first-child{margin-top:0}
-.hint{font-size:12.5px; color:var(--muted); margin-top:4px}
-.field-err{font-size:12px; color:var(--err); margin-top:4px}
-.grid2{display:grid; grid-template-columns:1fr 1fr; gap:12px}
-.grid3{display:grid; grid-template-columns:repeat(3,1fr); gap:10px}
+.hint{font-size:13.5px; font-weight:500; color:var(--muted); margin-top:6px}
+/* 关键提示：绿色、加粗、比普通说明大一档，用来点明「这栏填错就白配了」。
+   左侧加一条实心绿边，扫一眼就能和灰色说明区分开。 */
+.tip{
+  margin-top:9px; padding:10px 13px 10px 14px; border-radius:10px;
+  background:linear-gradient(180deg,#f3fdf8 0%,#e7f8ef 100%);
+  border:1px solid #b6e3cc; border-left:4px solid #12b76a;
+  color:#05603c; font-size:14.5px; font-weight:700; line-height:1.6;
+  box-shadow:var(--sh-xs), inset 0 1px 0 #fff;
+}
+.tip b{color:#04512f; font-weight:800}
+.field-err{font-size:13px; font-weight:600; color:var(--err); margin-top:5px}
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+.grid3{display:grid; grid-template-columns:repeat(3,1fr); gap:12px}
 @media(max-width:720px){.grid2,.grid3{grid-template-columns:1fr}}
 .pick{
-  border:1px solid var(--line); border-radius:var(--radius); padding:11px 12px; cursor:pointer;
-  background:#fff; transition:border-color .12s, background .12s;
+  border:1px solid var(--line); border-radius:13px; padding:13px 14px; cursor:pointer;
+  background:var(--grad-card); box-shadow:var(--sh-sm), var(--hi);
+  transition:border-color .14s, box-shadow .14s, transform .14s;
 }
-.pick:hover{border-color:var(--accent-line); background:#fbfcfe}
-.pick.on{border-color:var(--accent); background:var(--accent-soft); box-shadow:0 0 0 1px var(--accent)}
-.pick .t{font-weight:500; margin-bottom:3px; font-size:13px}
-.pick .d{font-size:12px; color:var(--muted); line-height:1.5}
+.pick:hover{border-color:var(--accent-line); transform:translateY(-1px);
+  box-shadow:var(--sh-md), var(--hi)}
+.pick.on{border-color:var(--accent); background:linear-gradient(180deg,#ffffff 0%,#eef4ff 100%);
+  box-shadow:0 0 0 2px rgba(37,99,235,.18), 0 8px 18px -8px rgba(37,99,235,.55), var(--hi)}
+.pick .t{font-weight:700; margin-bottom:4px; font-size:14.5px}
+.pick .d{font-size:13px; color:var(--muted); line-height:1.55}
 .badge{
-  display:inline-block; padding:1px 7px; border-radius:20px; font-size:11px; font-weight:500;
-  background:#f2f4f7; color:var(--muted); border:1px solid transparent; white-space:nowrap;
+  display:inline-block; padding:2px 9px; border-radius:999px; font-size:12.5px; font-weight:700;
+  background:linear-gradient(180deg,#ffffff,#f1f4f9); color:var(--muted);
+  border:1px solid #e4e9f1; white-space:nowrap; box-shadow:var(--sh-xs);
 }
-.badge.ok{background:var(--ok-soft); color:var(--ok); border-color:#bfe3d4}
-.badge.warn{background:var(--warn-soft); color:var(--warn); border-color:#f0dfae}
-.badge.err{background:var(--err-soft); color:var(--err); border-color:#f2c6c2}
-.badge.idle{background:#f2f4f7; color:var(--muted); border-color:transparent}
-.badge.tag{background:var(--accent-soft); color:var(--accent); border-color:transparent}
-.chips{display:flex; flex-wrap:wrap; gap:6px; margin-top:6px}
+.badge.ok{background:linear-gradient(180deg,#f3fdf8,#e3f6ed); color:var(--ok); border-color:#b6e3ce}
+.badge.warn{background:linear-gradient(180deg,#fffcf2,#fdf2d8); color:var(--warn); border-color:#eddcae}
+.badge.err{background:linear-gradient(180deg,#fff7f6,#fdeae8); color:var(--err); border-color:#f0c6c1}
+.badge.idle{background:linear-gradient(180deg,#fafbfd,#f0f3f8); color:var(--muted); border-color:#e4e9f1}
+.badge.tag{background:linear-gradient(180deg,#f4f8ff,#e6efff); color:var(--accent-2); border-color:#cfe0ff}
+.chips{display:flex; flex-wrap:wrap; gap:7px; margin-top:7px}
+/* 模态多选：给模型贴功能标签，所以用"实体标签"而不是复选框 ——
+   选中的那枚是压下去又弹起来的蓝色按钮。 */
+.mod-field{margin-bottom:12px}
+.mod-field .mod-name{font-size:13.5px; color:#46536a; font-weight:600; margin-bottom:7px}
+.mod-chips{display:flex; flex-wrap:wrap; gap:8px}
+.mod-chip{
+  display:inline-flex; align-items:center; gap:6px; padding:8px 16px; border-radius:999px;
+  border:1px solid var(--line-strong); background:var(--grad-btn); color:#46536a;
+  font-size:14px; font-weight:600; cursor:pointer; font-family:inherit;
+  box-shadow:0 1px 0 rgba(255,255,255,.9) inset, 0 1px 2px rgba(20,25,34,.09),
+             0 4px 10px -6px rgba(20,25,34,.25);
+  transition:background .14s, border-color .14s, color .14s, box-shadow .14s, transform .08s;
+}
+.mod-chip:hover:not(:disabled){border-color:var(--accent-line); color:var(--text); transform:translateY(-1px);
+  background:linear-gradient(180deg,#ffffff,#f3f8ff)}
+.mod-chip.on{border-color:#2456c9; color:#fff; font-weight:700;
+  background:var(--grad-accent); text-shadow:0 1px 1px rgba(9,30,80,.28);
+  box-shadow:0 1px 0 rgba(255,255,255,.32) inset, 0 2px 4px rgba(21,52,140,.30),
+             0 8px 18px -8px rgba(37,99,235,.7)}
+/* 全局 button:hover:not(:disabled) 的优先级(0,2,1)压过 .mod-chip.on(0,2,0)，
+   不写这条的话鼠标一悬停，选中态就"掉色"变灰。背景和边框都必须重写。 */
+.mod-chip.on:hover:not(:disabled){border-color:#2456c9; color:#fff;
+  background:linear-gradient(180deg,#6d99ff 0%,#3573f4 48%,#1b49c6 100%)}
+.mod-chip:before{content:"✓"; display:none; font-size:12px; font-weight:800; color:currentColor}
+.mod-chip.on:before{display:inline}
+.mod-chip:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+/* 模态标签（输入 文本/图片 → 输出 视频）走绿色：它说的是「这个模型能干什么」，
+   和「缺 Key / 熔断中」那种红黄告警不是一类信息。染成绿色既和告警色区分开，
+   又比原来那层灰蓝色更像「能力」而不是「状态」。
+   「输入 / 输出」用浅一档的灰绿做小字，模态值用深绿加粗 —— 视线先落在
+   「吃什么、吐什么」上，两个提示词反而退到背景里。 */
+.badge.mod{background:linear-gradient(180deg,#f1fcf6,#d9f1e4); color:#0a6446;
+  border-color:#96d8b8; font-family:inherit; letter-spacing:.01em; padding:3px 11px;
+  box-shadow:0 1px 0 rgba(255,255,255,.94) inset, 0 1px 2px rgba(10,100,70,.12)}
+.badge.mod .mod-k{color:#4d8a6c; font-weight:600}
+.badge.mod .mod-v{font-weight:800; color:#076641}
+.badge.mod .mod-arrow{color:#2f9468; font-weight:700; margin:0 5px; font-size:13px}
 .note{
-  font-size:12.5px; padding:9px 12px; border-radius:8px; margin:10px 0;
-  background:var(--accent-soft); color:#1e40af; border:1px solid var(--accent-line);
+  font-size:13.5px; font-weight:500; padding:12px 14px; border-radius:12px; margin:12px 0;
+  background:linear-gradient(180deg,#f5f9ff,#eaf2ff); color:#1b3f96;
+  border:1px solid var(--accent-line); box-shadow:var(--sh-xs), inset 0 1px 0 #fff;
 }
-.note.warn{background:var(--warn-soft); color:var(--warn); border-color:#f0dfae}
-.note.err{background:var(--err-soft); color:var(--err); border-color:#f2c6c2}
+.note.warn{background:linear-gradient(180deg,#fffbf0,#fdf2d8); color:var(--warn); border-color:#eddcae}
+.note.err{background:linear-gradient(180deg,#fff7f6,#fdeae8); color:var(--err); border-color:#f0c6c1}
 .empty{
-  text-align:center; padding:32px 20px; color:var(--muted); border:1px dashed var(--line-strong);
-  border-radius:var(--radius); background:#fbfcfd;
+  text-align:center; padding:36px 22px; color:var(--muted); border:1px dashed var(--line-strong);
+  border-radius:var(--radius); background:linear-gradient(180deg,#fdfeff,#f4f7fc);
+  box-shadow:inset 0 2px 6px rgba(20,25,34,.05);
 }
-.empty .big{font-size:14px; color:var(--text); margin-bottom:6px; font-weight:500}
-.checks{margin-top:10px; border-top:1px solid var(--line); padding-top:10px}
-.chk{display:flex; gap:9px; padding:5px 0; align-items:flex-start}
+.empty .big{font-size:15.5px; color:var(--text); margin-bottom:7px; font-weight:700}
+.checks{margin-top:12px; border-top:1px solid var(--line); padding-top:12px}
+.chk{display:flex; gap:10px; padding:6px 0; align-items:flex-start}
 .dot{
-  flex:0 0 auto; width:16px; height:16px; border-radius:50%; font-size:11px; line-height:16px;
-  text-align:center; font-weight:600; margin-top:2px;
+  flex:0 0 auto; width:18px; height:18px; border-radius:50%; font-size:11.5px; line-height:18px;
+  text-align:center; font-weight:800; margin-top:2px; box-shadow:var(--sh-xs), inset 0 1px 0 #fff;
 }
 .dot.pass{background:var(--ok-soft); color:var(--ok)}
 .dot.fail{background:var(--err-soft); color:var(--err)}
 .dot.warn{background:var(--warn-soft); color:var(--warn)}
-.dot.skip{background:#f2f4f7; color:var(--faint)}
-.chk .n{font-weight:500; font-size:12.5px; margin-right:6px}
-.chk .t{font-size:12.5px; color:var(--muted)}
+.dot.skip{background:#f0f3f8; color:var(--faint)}
+.chk .n{font-weight:700; font-size:13.5px; margin-right:6px}
+.chk .t{font-size:13.5px; color:var(--muted)}
 .spin{
-  display:inline-block; width:13px; height:13px; border:2px solid var(--accent-line);
+  display:inline-block; width:14px; height:14px; border:2px solid var(--accent-line);
   border-top-color:var(--accent); border-radius:50%; animation:sp .7s linear infinite;
-  vertical-align:-2px; margin-right:6px;
+  vertical-align:-2px; margin-right:7px;
 }
 @keyframes sp{to{transform:rotate(360deg)}}
-details.adv{margin-top:14px; border-top:1px solid var(--line); padding-top:10px}
-details.adv summary{cursor:pointer; font-size:12.5px; color:var(--muted); list-style:none;
-  padding:2px 4px; margin-left:-4px; border-radius:6px; transition:background .12s, color .12s}
-details.adv summary:hover{color:var(--text); background:#f2f4f7}
+details.adv{margin-top:16px; border-top:1px solid var(--line); padding-top:12px}
+details.adv summary{cursor:pointer; font-size:13.5px; font-weight:600; color:var(--muted); list-style:none;
+  padding:5px 8px; margin-left:-8px; border-radius:9px; transition:background .12s, color .12s}
+details.adv summary:hover{color:var(--text); background:#eff3f9}
 details.adv summary:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
 details.adv summary::-webkit-details-marker{display:none}
 details.adv summary:before{content:"▸ "; color:var(--faint)}
@@ -150,134 +283,170 @@ details.adv .inner{padding-top:12px}
 /* 中转站/自建网关用户的必读项：这里的接口地址不改，等于拿网关发的 Key 去敲官网，
    必然 401。原来挤在 summary 的 muted 小字里等于没说，得单独拎出来。 */
 details.adv summary .must{
-  color:var(--err); font-weight:600;
-  background:var(--err-soft); padding:1px 7px; border-radius:6px;
+  color:var(--err); font-weight:700;
+  background:linear-gradient(180deg,#fdeceb,#fbdcd9); padding:1px 8px; border-radius:7px;
+  box-shadow:inset 0 1px 0 #fff;
 }
-.mlist{display:flex; flex-direction:column; gap:8px}
+.mlist{display:flex; flex-direction:column; gap:10px}
 /* 模型页头：页签和"添加模型"放同一行，减少零散的工具条 */
 .model-head{display:flex; align-items:center; justify-content:space-between; gap:12px;
-  flex-wrap:wrap; margin:18px 0 10px}
+  flex-wrap:wrap; margin:20px 0 12px}
 .model-head-actions{display:flex; align-items:center; gap:10px}
-.kind-tabs{display:inline-flex; gap:2px; padding:3px; margin:0; background:#eef0f3;
-  border:1px solid var(--line); border-radius:10px; max-width:100%; flex-wrap:wrap}
-.kind-tab{display:flex; align-items:center; gap:7px; padding:8px 16px; border:0;
-  border-radius:8px; background:transparent; color:var(--muted); font-size:15px;
-  font-weight:600; cursor:pointer; font-family:inherit; line-height:1.2; box-shadow:none;
-  transition:background .12s, color .12s}
-.kind-tab:hover{color:var(--text); background:#f7f8fa}
+.kind-tabs{display:inline-flex; gap:4px; padding:5px; margin:0;
+  background:linear-gradient(180deg,#e7ecf5 0%,#eff3fa 100%);
+  border:1px solid #d9e0ec; border-radius:15px; max-width:100%; flex-wrap:wrap;
+  box-shadow:var(--sh-inset), 0 1px 0 #fff}
+.kind-tab{display:flex; align-items:center; gap:8px; padding:10px 20px; border:0;
+  border-radius:11px; background:transparent; color:var(--muted); font-size:16.5px;
+  font-weight:700; cursor:pointer; font-family:inherit; line-height:1.2; box-shadow:none;
+  transition:background .15s, color .15s, box-shadow .15s}
+.kind-tab:hover{color:var(--text); background:rgba(255,255,255,.55)}
 .kind-tab:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
-.kind-tab.on{background:#fff; color:var(--accent); box-shadow:0 1px 3px rgba(16,24,40,.12)}
-.kind-tab .kc{font-size:11px; font-weight:600; color:var(--muted);
-  background:#e4e7ec; border-radius:20px; padding:1px 7px; min-width:18px; text-align:center}
-.kind-tab.on .kc{background:var(--accent-soft); color:var(--accent)}
+.kind-tab.on{color:var(--accent-2); background:linear-gradient(180deg,#ffffff 0%,#f3f8ff 100%);
+  box-shadow:var(--hi), 0 2px 4px rgba(20,25,34,.10), 0 10px 20px -10px rgba(37,99,235,.5)}
+.kind-tab .kc{font-size:12px; font-weight:800; color:var(--muted);
+  background:linear-gradient(180deg,#eef1f6,#e3e8f0); border-radius:999px; padding:1px 8px;
+  min-width:20px; text-align:center; box-shadow:inset 0 1px 2px rgba(20,25,34,.12)}
+.kind-tab.on .kc{background:linear-gradient(180deg,#f4f8ff,#e2ecff); color:var(--accent-2);
+  box-shadow:inset 0 1px 2px rgba(37,99,235,.16)}
 /* 全局 button:hover 的优先级比单个 .tab / .kind-tab 高，这里用更高优先级
-   把激活态的底色和下划线钉住，避免鼠标一悬停就"掉色"。 */
-.tabs .tab:hover{border-bottom-color:transparent; background:#f2f4f7}
-.tabs .tab.on,.tabs .tab.on:hover{background:var(--accent-soft); border-bottom-color:var(--accent); color:var(--accent)}
-.kind-tabs .kind-tab:hover{background:#f7f8fa; color:var(--text)}
-.kind-tabs .kind-tab.on,.kind-tabs .kind-tab.on:hover{background:#fff; color:var(--accent)}
-.toolbar{display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:14px}
+   把激活态的底色钉住，避免鼠标一悬停就"掉色"。 */
+.tabs .tab:hover{background:rgba(255,255,255,.55); color:var(--text)}
+.tabs .tab.on,.tabs .tab.on:hover{background:linear-gradient(180deg,#ffffff 0%,#f3f8ff 100%); color:var(--accent-2)}
+.kind-tabs .kind-tab:hover{background:rgba(255,255,255,.55); color:var(--text)}
+.kind-tabs .kind-tab.on,.kind-tabs .kind-tab.on:hover{
+  background:linear-gradient(180deg,#ffffff 0%,#f3f8ff 100%); color:var(--accent-2)}
+.toolbar{display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px}
 .model-page{display:none}
 .model-page.on{display:block}
-/* 路由摘要：一行浅灰说明，不再用整张卡片 */
-.routing-bar{padding:9px 12px; margin:0 0 6px; background:#f8fafc; border:1px solid var(--line);
-  border-radius:8px; color:var(--muted); font-size:12.5px; line-height:1.6;
+/* 路由摘要：一行浅灰说明，做成轻微凹槽面板 */
+.routing-bar{padding:12px 14px; margin:0 0 10px;
+  background:linear-gradient(180deg,#fbfcfe 0%,#f2f6fc 100%); border:1px solid var(--line);
+  border-radius:12px; color:var(--muted); font-size:13.5px; line-height:1.65;
+  box-shadow:var(--sh-xs), inset 0 1px 0 #fff;
   display:flex; align-items:baseline; gap:8px; flex-wrap:wrap}
 .routing-bar #prob-summary{flex:1; min-width:0}
-.routing-bar b{color:var(--text); font-weight:600}
-.strategy-select{width:auto; font-family:inherit; font-size:12px; font-weight:600;
-  color:var(--accent); background:var(--accent-soft); border:1px solid var(--accent-line);
-  border-radius:999px; padding:3px 8px; cursor:pointer}
-.strategy-select:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
-.strategy-select:disabled{opacity:.6; cursor:not-allowed}
-.strategy-hint{flex-basis:100%; margin-top:2px; color:var(--muted); font-size:12px; line-height:1.5}
-.strategy-hint:empty{display:none}
-/* 优先级分组标题：用 6px 小圆点表达首选/备用/兜底，避免多种彩色徽标 */
-.tier-h{display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin:16px 0 5px}
+.routing-bar b{color:var(--text); font-weight:700}
+/* 策略只剩一种，不再做成下拉：一个固定标签说明当前口径就够了 */
+.strategy-badge{flex:0 0 auto; font-size:13px; font-weight:700;
+  color:var(--accent-2); background:linear-gradient(180deg,#f4f8ff,#e6efff);
+  border:1px solid var(--accent-line);
+  border-radius:999px; padding:5px 12px; white-space:nowrap;
+  box-shadow:0 1px 0 #fff inset, 0 2px 5px -3px rgba(37,99,235,.4)}
+/* 优先级分组标题：用 8px 小圆点表达首选/备用/兜底，避免多种彩色徽标 */
+.tier-h{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:18px 0 6px}
 .mlist .tier-h:first-child{margin-top:4px}
-.tier-h .tier-t{font-size:13px; font-weight:600; color:var(--text)}
-.tier-h .hint{margin:0; font-size:12px}
-.tier-dot{width:6px; height:6px; border-radius:50%; background:var(--faint); flex:0 0 auto}
-.tier-dot.ok{background:#12b76a}
-.tier-dot.warn{background:#f79009}
-.tier-dot.idle{background:#c4c9d2}
-.tier-dot.accent{background:var(--accent)}
+.tier-h .tier-t{font-size:14.5px; font-weight:700; color:var(--text)}
+.tier-h .hint{margin:0; font-size:13px}
+.tier-dot{width:8px; height:8px; border-radius:50%; background:var(--faint); flex:0 0 auto;
+  box-shadow:0 0 0 3px rgba(20,25,34,.06)}
+.tier-dot.ok{background:#12b76a; box-shadow:0 0 0 3px rgba(18,183,106,.16)}
+.tier-dot.warn{background:#f79009; box-shadow:0 0 0 3px rgba(247,144,9,.16)}
+.tier-dot.idle{background:#c4c9d2; box-shadow:0 0 0 3px rgba(20,25,34,.05)}
+.tier-dot.accent{background:var(--accent); box-shadow:0 0 0 3px rgba(37,99,235,.16)}
+/* 模型卡：整块是有厚度的，悬停时轻轻抬起 */
 .mitem{
-  display:flex; gap:12px; align-items:center; padding:12px 14px; border:1px solid var(--line);
-  border-radius:10px; background:#fff;
+  display:flex; gap:14px; align-items:center; padding:16px 18px; border:1px solid #dee4ef;
+  border-bottom-color:#d4dceb;
+  border-radius:14px; background:var(--grad-card);
+  box-shadow:var(--sh-sm), 0 1px 1px rgba(20,25,34,.05), var(--hi);
+  transition:box-shadow .18s, transform .18s;
 }
+.mitem:hover{box-shadow:var(--sh-md), var(--hi); transform:translateY(-1px)}
+.actions-row{display:flex; align-items:center; gap:8px; flex:0 0 auto; flex-wrap:wrap; justify-content:flex-end}
 .mitem.off{opacity:.55}
 .mitem .info{flex:1; min-width:0}
-.mitem .nm{font-size:14px; font-weight:600; display:flex; align-items:center; gap:6px; flex-wrap:wrap}
-.mitem .meta{font-size:12px; color:var(--muted); margin-top:3px}
-.switch{position:relative; width:40px; height:22px; flex:0 0 auto}
+.mitem .nm{font-size:16.5px; font-weight:700; display:flex; align-items:center; gap:7px; flex-wrap:wrap}
+.mitem .meta{font-size:13.5px; color:var(--muted); margin-top:4px}
+.switch{position:relative; width:46px; height:26px; flex:0 0 auto}
 .switch input{opacity:0; width:0; height:0; position:absolute}
 .switch span{
-  position:absolute; inset:0; background:#d0d5dd; border-radius:22px; cursor:pointer; transition:.15s;
+  position:absolute; inset:0; border-radius:26px; cursor:pointer;
+  background:linear-gradient(180deg,#c6cfdd 0%,#dde3ee 100%);
+  box-shadow:var(--sh-inset), 0 1px 0 #fff;
+  transition:background .15s, box-shadow .15s;
 }
 .switch span:before{
-  content:""; position:absolute; width:16px; height:16px; left:3px; top:3px; background:#fff;
-  border-radius:50%; transition:.15s; box-shadow:0 1px 2px rgba(16,24,40,.2);
+  content:""; position:absolute; width:20px; height:20px; left:3px; top:3px;
+  background:linear-gradient(180deg,#ffffff,#eef1f7);
+  border-radius:50%; transition:transform .15s;
+  box-shadow:0 1px 3px rgba(20,25,34,.30), 0 2px 6px rgba(20,25,34,.16);
 }
-.switch input:checked + span{background:var(--accent)}
-.switch input:checked + span:before{transform:translateX(18px)}
+.switch input:checked + span{background:var(--grad-accent);
+  box-shadow:inset 0 2px 4px rgba(9,30,80,.35), 0 2px 8px rgba(37,99,235,.35)}
+.switch input:checked + span:before{transform:translateX(20px)}
 .switch input:focus-visible + span{outline:2px solid var(--accent); outline-offset:2px}
 .preview{
-  max-width:260px; max-height:260px; border-radius:8px; border:1px solid var(--line);
-  display:block; margin-top:10px;
+  max-width:280px; max-height:280px; border-radius:12px; border:1px solid var(--line);
+  display:block; margin-top:12px; box-shadow:var(--sh-md);
 }
-.actions{display:flex; gap:8px; flex-wrap:wrap; margin-top:18px; padding-top:16px; border-top:1px solid var(--line)}
-.warnlist{margin:12px 0 0; padding-left:18px; color:var(--warn); font-size:12.5px}
-.footer{margin-top:32px; color:var(--faint); font-size:12px; text-align:center}
+.actions{display:flex; gap:10px; flex-wrap:wrap; margin-top:20px; padding-top:18px;
+  border-top:1px solid var(--line)}
+.warnlist{margin:12px 0 0; padding-left:20px; color:var(--warn); font-size:13.5px; font-weight:500}
+.footer{margin-top:36px; color:var(--faint); font-size:13px; text-align:center}
 /* 键盘可达：可点选的卡片（厂商/类目）用 div 实现，必须补上焦点样式，
    否则 Tab 键走到它时看不见焦点在哪。 */
 .pick:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
 /* 顶部路径栏：默认折叠，给新手降噪；点开才看绝对路径。 */
 details.pathbar{padding:0; overflow:hidden}
 details.pathbar > summary{
-  cursor:pointer; list-style:none; padding:9px 12px; font-size:12px; color:var(--muted);
-  display:flex; align-items:center; gap:6px; transition:background .12s, color .12s;
+  cursor:pointer; list-style:none; padding:11px 14px; font-size:13px; font-weight:600;
+  color:var(--muted);
+  display:flex; align-items:center; gap:7px; transition:background .12s, color .12s;
 }
-details.pathbar > summary:hover{color:var(--text); background:#f8fafc}
+details.pathbar > summary:hover{color:var(--text); background:#f3f6fb}
 details.pathbar > summary:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
 details.pathbar > summary::-webkit-details-marker{display:none}
-details.pathbar > summary:before{content:"▸"; color:var(--faint); font-size:10px}
+details.pathbar > summary:before{content:"▸"; color:var(--faint); font-size:11px}
 details.pathbar[open] > summary:before{content:"▾"}
 details.pathbar[open] > summary{border-bottom:1px solid var(--line)}
 details.pathbar .paths{
-  display:flex; flex-wrap:wrap; gap:6px 16px; padding:10px 12px;
+  display:flex; flex-wrap:wrap; gap:6px 16px; padding:12px 14px;
 }
 /* 权重控件：滑块为主、数字为辅，两者并排避免"该拖还是该填"的犹豫。 */
-.wrow{display:flex; align-items:center; gap:12px}
+.wrow{display:flex; align-items:center; gap:14px}
 .wrow input[type=range]{flex:1}
-.wrow input[type=number]{flex:0 0 84px; width:84px; text-align:center}
+.wrow input[type=number]{flex:0 0 92px; width:92px; text-align:center; font-weight:700}
 /* 错误提示条：比成功 toast 更醒目、停留更久，且支持多行/长文案。 */
 #err-toast{
   position:fixed; left:50%; bottom:28px; transform:translateX(-50%);
-  max-width:min(560px, calc(100vw - 32px));
-  background:var(--err); color:#fff; padding:11px 18px; border-radius:10px;
-  font-size:13px; line-height:1.5; z-index:100; opacity:0; transition:opacity .2s;
-  box-shadow:0 6px 24px rgba(180,35,24,.28); pointer-events:none; white-space:pre-wrap;
+  max-width:min(580px, calc(100vw - 32px));
+  background:linear-gradient(180deg,#c03024 0%,#a81c11 100%); color:#fff;
+  padding:13px 20px; border-radius:13px;
+  font-size:14px; font-weight:600; line-height:1.55; z-index:100; opacity:0; transition:opacity .2s;
+  box-shadow:0 2px 4px rgba(120,20,12,.3), 0 12px 30px -8px rgba(120,20,12,.5);
+  pointer-events:none; white-space:pre-wrap;
 }
 #err-toast.show{opacity:1; pointer-events:auto}
 #err-toast .x{
-  float:right; margin:-2px -6px 0 12px; cursor:pointer; font-size:16px; line-height:1;
-  color:#fff; opacity:.75; background:none; border:0; padding:2px 4px; box-shadow:none;
+  float:right; margin:-2px -6px 0 12px; cursor:pointer; font-size:17px; line-height:1;
+  color:#fff; opacity:.8; background:none; border:0; padding:2px 4px; box-shadow:none;
 }
 #err-toast .x:hover{opacity:1}
 /* 确认弹窗：页面内的模态框，替代原生 confirm()（阻塞式、样式割裂）。 */
 #modal-mask{
-  position:fixed; inset:0; background:rgba(15,23,42,.4); z-index:110;
+  position:fixed; inset:0; background:rgba(15,23,42,.45); z-index:110;
   display:none; align-items:center; justify-content:center; padding:24px;
+  -webkit-backdrop-filter:blur(3px); backdrop-filter:blur(3px);
 }
 #modal-mask.show{display:flex}
 #modal-box{
-  background:var(--card); border:1px solid var(--line); border-radius:12px;
-  max-width:400px; width:100%; padding:20px 22px; box-shadow:0 12px 40px rgba(15,23,42,.18);
+  background:var(--grad-card); border:1px solid #dfe5f0; border-radius:18px;
+  max-width:420px; width:100%; padding:24px 26px; box-shadow:var(--sh-lg), var(--hi);
 }
-#modal-box h4{margin:0 0 8px; font-size:15px}
-#modal-box p{margin:0 0 18px; font-size:13px; line-height:1.6; color:var(--muted); word-break:break-all}
-#modal-box .mactions{display:flex; gap:8px; justify-content:flex-end}
+#modal-box h4{margin:0 0 10px; font-size:17px; font-weight:700}
+#modal-box p{margin:0 0 20px; font-size:14px; line-height:1.65; color:var(--muted); word-break:break-all}
+#modal-box .mactions{display:flex; gap:10px; justify-content:flex-end}
+/* 窄屏：卡片里的按钮允许换到下一行，否则文字被挤成一列单字 */
+@media(max-width:620px){
+  .mitem{flex-wrap:wrap; row-gap:12px}
+  .mitem .info{flex:1 1 180px}
+  .actions-row{flex:1 1 100%; justify-content:flex-start}
+  .wrow{flex-wrap:wrap}
+  .wrow input[type=number]{margin-left:auto}
+  .model-head{gap:10px}
+  .pathbar .paths{gap:6px 12px}
+}
 </style>
 </head>
 <body data-page-node-id="f19vwG2ExfrvsJDvH03s4C">
@@ -349,13 +518,25 @@ details.pathbar .paths{
               <input id="vf-ep-video" class="mono" placeholder="留空＝该平台官方地址" data-page-node-id="rHcSMOKfd2n591zulV0z7c">
             </div>
           </div>
+          <div class="grid2" style="margin-top:14px">
+            <div>
+              <label class="lbl" style="margin-top:0">语音接口地址</label>
+              <input id="vf-ep-audio" class="mono" placeholder="留空＝该平台官方地址">
+            </div>
+            <div>
+              <div class="hint" style="margin-top:24px">
+                只有语音模型（TTS / ASR）用得上。很多平台的语音接口和图像不在同一个域名下，
+                用中转站时要分别填对。
+              </div>
+            </div>
+          </div>
           <div class="hint" data-page-node-id="RslwNAPwG5ltQChLDO8chy">留空就是用各平台的官方地址；<b>但用中转站 / 自建网关时不能留空</b> —— 那等于拿网关发的 Key 去敲官网，必然 401，必须把地址改成你自己的网关地址。</div>
 
           <div id="vf-options-box">
           <label class="lbl" style="margin-top:16px" data-page-node-id="ICbUF52GgRlXo61RDZ86Zt">接口参数（options，JSON）</label>
           <textarea id="vf-options" class="mono" rows="7"
-            style="width:100%; padding:9px 11px; border:1px solid var(--line-strong);
-                   border-radius:8px; font-size:12.5px; line-height:1.6; resize:vertical"
+            style="width:100%; padding:10px 12px; border:1px solid #c3ccdc;
+                   border-radius:10px; font-size:13.5px; line-height:1.7; resize:vertical"
             placeholder='{"auth": {"type": "bearer"}}'></textarea>
           <div class="hint" data-page-node-id="z1V04BSbQ4OoHxVSBAp2rH">
             自定义接口没有内置协议，得靠这块说明「请求怎么发、结果从哪儿取」。
@@ -408,15 +589,9 @@ details.pathbar .paths{
   </div>
 
   <div class="routing-bar" id="routing-bar"
-    title="priority_then_weight：只有最低优先级档参与首选，同档按权重分流；备用档在前序档位全部不可用时才启用。weight_only 忽略优先级按全局权重分流；fallback_chain 按优先级和权重严格排序。">
-    <select id="strategy-select" class="strategy-select" aria-label="当前路由策略"
-      aria-describedby="strategy-hint" title="当前策略">
-      <option value="priority_then_weight">按优先级（同档加权）</option>
-      <option value="weight_only">全局权重（忽略优先级）</option>
-      <option value="fallback_chain">严格顺位（按序不随机）</option>
-    </select>
+    title="只有最低优先级档参与首选，同档按权重分流；备用档在前序档位全部不可用时才启用。">
+    <span class="strategy-badge">按优先级 · 同档加权</span>
     <div id="prob-summary" data-page-node-id="SYvV2jyl43sSDY3y7uvpB8"></div>
-    <div id="strategy-hint" class="strategy-hint" aria-live="polite"></div>
   </div>
 
   <div id="model-list" data-page-node-id="8PHrPQ1HIUr6JH6kjKhGsq"></div>
@@ -433,9 +608,30 @@ details.pathbar .paths{
       <input id="mf-model" class="mono" placeholder="例如 doubao-seedream-3-0-t2i-250415" list="model-suggestions" data-page-node-id="BKOQdExiCTAFvmbTWtQFDn">
     </div>
     <datalist id="model-suggestions" data-page-node-id="HoqZQ3ZXF2E20SVyFL5nWT"></datalist>
+    <div class="tip">这里填的是<b>厂商那边的模型名</b>，必须严格照抄厂商的命名规则 ——
+      大小写、版本号、日期后缀都不能改，写错接口会直接报「模型不存在」。</div>
     <div class="hint" id="mf-model-hint" data-page-node-id="2m5zoz07TEnz7mZuqmrc98">以厂商控制台里显示的模型名为准，手动填写。</div>
 
-    <label class="lbl">③ 生成规格（可选）</label>
+    <label class="lbl">显示名称（可选）</label>
+    <input id="mf-label" placeholder="留空则显示模型名" data-page-node-id="X7zEuFac8b0zlBiZYew1Sl">
+    <div class="tip">只影响这个页面和列表里的显示。没有改名需求就<b>留空</b>，
+      默认直接用上面的模型名称。</div>
+
+    <label class="lbl">③ 输入 / 输出模态（可多选）</label>
+    <div class="mod-field">
+      <div class="mod-name">输入模态 —— 这个模型能接受什么</div>
+      <div class="mod-chips" id="mf-in-mods" role="group" aria-label="输入模态，可多选"></div>
+    </div>
+    <div class="mod-field">
+      <div class="mod-name">输出模态 —— 这个模型能产出什么</div>
+      <div class="mod-chips" id="mf-out-mods" role="group" aria-label="输出模态，可多选"></div>
+    </div>
+    <div class="hint" id="mf-mods-hint">
+      功能标签：告诉 AI 助手这个模型吃什么、吐什么，它才好挑对模型。
+      输入里勾上「图片」，就会同时标成支持图生图 / 图生视频。
+    </div>
+
+    <label class="lbl">④ 生成规格（可选）</label>
     <div id="mf-spec-image">
       <div class="grid2">
         <div>
@@ -443,6 +639,7 @@ details.pathbar .paths{
           <select id="mf-size-preset">
             <option value="">不指定（用平台默认）</option>
             <option value="1024x1024">1024×1024（方图 1K）</option>
+            <option value="1328x1328">1328×1328（推荐：网页/PPT 够用，单张约 2MB）</option>
             <option value="1536x1024">1536×1024（横图 1.5K）</option>
             <option value="1024x1536">1024×1536（竖图 1.5K）</option>
             <option value="2048x2048">2048×2048（方图 2K）</option>
@@ -455,6 +652,8 @@ details.pathbar .paths{
         <div>
           <div class="hint" style="margin-top:24px">
             这里设的是这个模型<b>每次生成</b>的默认尺寸。发请求时也可以在提示里临时指定，临时的优先。
+            选「不指定」时用的是平台默认值 —— 不少平台会直接给 2048×2048（单张 5MB 以上），
+            网页、PPT、聊天窗这类下游往往用不到这么大，建议选 1328×1328 或 1024×1024。
             注意：不是每个模型都支持所有尺寸（比如有的只收 1024×1024，有的用「1K/2K/4K」这种叫法），
             以厂商文档为准；填了不支持的值平台会报错。
           </div>
@@ -491,45 +690,54 @@ details.pathbar .paths{
         不是每个模型都支持全部组合（可灵一般 5/10 秒，即梦 3~12 秒），以厂商文档为准。
       </div>
     </div>
+    <div id="mf-spec-audio" style="display:none">
+      <div class="grid2">
+        <div>
+          <label class="lbl" style="margin-top:0">音色</label>
+          <input id="mf-voice" class="mono" placeholder="例如 Cherry / alloy / 女声-温柔">
+        </div>
+        <div>
+          <label class="lbl" style="margin-top:0">语速</label>
+          <input id="mf-speed" class="mono" type="number" min="0.25" max="4" step="0.05"
+                 placeholder="不指定（一般为 1.0）">
+        </div>
+      </div>
+      <label class="lbl">音频格式</label>
+      <select id="mf-audio-format">
+        <option value="">不指定（用平台默认）</option>
+        <option value="mp3">mp3（兼容性最好）</option>
+        <option value="wav">wav（无损、体积大）</option>
+        <option value="opus">opus（体积小）</option>
+        <option value="aac">aac</option>
+        <option value="flac">flac</option>
+        <option value="pcm">pcm（裸流，需自行封装）</option>
+      </select>
+      <div class="hint">
+        音色名以厂商控制台为准（各家叫法不同：Cherry、alloy、BV001…），留空就用平台默认音色。
+        语速通常 0.5~2.0，超出范围平台会报错。
+      </div>
+    </div>
 
-    <label class="lbl" data-page-node-id="dpseboGl3sed5boZrVdgoG">④ 权重：<span id="mf-w-label" style="color:var(--accent)" data-page-node-id="YZ9GH2u4cN2crpdNI1LREh">50</span></label>
+    <label class="lbl" data-page-node-id="dpseboGl3sed5boZrVdgoG">⑤ 权重：<span id="mf-w-label" style="color:var(--accent)" data-page-node-id="YZ9GH2u4cN2crpdNI1LREh">50</span></label>
     <div class="wrow">
       <input type="range" id="mf-weight-range" min="1" max="100" value="50" aria-label="权重滑块" data-page-node-id="qkCwfGU49eqcbLoMJY51fo">
       <input type="number" id="mf-weight" min="0" step="1" value="50" aria-label="权重数值" data-page-node-id="VvBMOW2D11T3PyaVLkZbLW">
     </div>
     <div class="hint" data-page-node-id="ukOi2LggVQtsdC9GxnoWSm">拖动滑块或直接填数字都行。越大越容易被选中；同一优先级内按权重比例分流，例如 50 和 30 大约是 62% 与 38%。</div>
 
-    <details class="adv" data-page-node-id="8bs3eYnmK8z2AO7F7kjwFw">
-      <summary data-page-node-id="FCux7gWCmZGUXG79YVNAD7">高级选项</summary>
-      <div class="inner" data-page-node-id="f7E183LJIWVb8UjT1xjgoS">
-        <label class="lbl" style="margin-top:0" data-page-node-id="iWoifa3RDs8YSxEtMLsnoF">优先级</label>
-        <input type="number" id="mf-priority" min="1" step="1" value="1" data-page-node-id="xGGHjKSz0EmhCba3F4svSc">
-        <div class="hint" data-page-node-id="ERFPE0dsgVRNJP4a8XcSTM">
-          数字越小越优先。优先级 1 的模型永远压过优先级 2 —— 只有前面的都不可用才会轮到后面的。
-          想按权重分流就都填 1，想设成"主用 + 备用"就给备用模型填 2。
-        </div>
-
-        <label class="lbl" data-page-node-id="uY9iBD1ACV8v1zXSnKzlAK">附加能力</label>
-        <label style="display:flex; gap:8px; align-items:flex-start; font-weight:400; margin-bottom:6px" data-page-node-id="WFKKp7N4sqilK5Y8Ym0Sc6">
-          <input type="checkbox" id="mf-extra" style="width:auto; margin-top:4px" data-page-node-id="q5d1cke10J64XWFxsAnEOh">
-          <span data-page-node-id="mTQGcF8nx8XzI1DuJEgoCg">支持以图片作为输入（图生图 / 图生视频）
-            <span class="hint" style="display:block" data-page-node-id="2em0KmTqZlmhRWnpb7T9TP">不确定就先不勾。勾错了会在实际使用时失败。</span>
-          </span>
-        </label>
-
-        <label class="lbl" data-page-node-id="bCQkraJBJZLjLRTkbVxrEb">显示名称</label>
-        <input id="mf-label" placeholder="留空则用模型名" data-page-node-id="X7zEuFac8b0zlBiZYew1Sl">
-      </div>
-    </details>
+    <label class="lbl">⑥ 优先级</label>
+    <input type="number" id="mf-priority" min="1" step="1" value="1" data-page-node-id="xGGHjKSz0EmhCba3F4svSc">
+    <div class="tip">没有优先级需求就保持 <b>1</b>（默认值）。
+      数字越小越优先：<b>优先级 1 的模型永远压过 2</b>，只有前面的都不可用时才会轮到后面的。</div>
+    <div class="hint" data-page-node-id="ERFPE0dsgVRNJP4a8XcSTM">
+      优先级负责「分档」，权重负责「同档内分流」。想让几个模型按权重分摊流量 → 都填 1；
+      想设成「主用 + 备用」→ 备用模型填 2，主用挂了才会自动切过去。
+    </div>
 
     <input type="hidden" id="mf-id" data-page-node-id="WDlSUEppOvnfHXjEEKY3Dl">
 
-    <div id="mf-result" data-page-node-id="SxOkeXzukZi6GNIL1MZECe"></div>
-
     <div class="actions" data-page-node-id="V4rFlhumRkzFfsjvHkSrhE">
       <button class="primary" id="btn-save-model" data-page-node-id="VVFQ7HqK8XuKgq1Yo8B7FC">保存模型</button>
-      <button id="btn-test-model" data-page-node-id="19XLoVZR31XpGz2VZhbwof">测试连通性</button>
-      <button id="btn-real-test-model" data-page-node-id="rtestmodel001">真实测试</button>
       <button id="btn-cancel-model" data-page-node-id="0gQYEfkrbaO3zH0pjpgSun">取消</button>
     </div>
   </div>
@@ -543,8 +751,9 @@ details.pathbar .paths{
 <script>
 const TOKEN = "__MR_TOKEN__";
 
-const state = {catalog:[], vendors:[], models:{}, strategies:{}, kinds:["image","video"], warnings:[], paths:{}};
-let pick = {catalog_key:"", kind:"image", activeKind:"image", extra:false, editingVendor:null, editingModel:null};
+const state = {catalog:[], vendors:[], models:{}, kinds:["image","video","audio"], warnings:[], paths:{}};
+let pick = {catalog_key:"", kind:"image", activeKind:"image",
+  inputMods:["text"], outputMods:["image"], editingVendor:null, editingModel:null};
 
 /* ------------------------------------------------------------------ 工具 */
 /* 页面内确认弹窗（Promise 风格，供 await）。替代原生 confirm()：
@@ -684,8 +893,7 @@ async function loadAll(){
   state.catalog = data.catalog;
   state.vendors = data.vendors;
   state.models = data.models;
-  state.strategies = data.strategies || {};
-  state.kinds = data.kinds.length ? data.kinds : ["image","video"];
+  state.kinds = data.kinds.length ? data.kinds : ["image","video","audio"];
   state.warnings = data.warnings || [];
   state.paths = data.paths || {};
   el("p-skill").textContent = data.paths.skill_dir;
@@ -757,6 +965,15 @@ function renderProviderGrid(){
   }).join("");
 }
 
+/* 收起厂商表单。和模型表单一样：保存成功后要回到列表，
+   之前是 showVendorForm(刚保存的厂商) —— 表单一直开着，看着像没保存成功。 */
+function closeVendorForm(){
+  const form = el("vendor-form");
+  if(form) form.style.display = "none";
+  pick.editingVendor = null;
+  el("vf-result").innerHTML = "";
+}
+
 function showVendorForm(vendor){
   pick.editingVendor = vendor ? vendor.id : null;
   pick.catalog_key = vendor ? (vendor.catalog || vendor.provider) : "";
@@ -768,13 +985,16 @@ function showVendorForm(vendor){
   el("vf-label").value = vendor ? (vendor.label||"") : "";
   el("vf-ep-image").value = vendor && vendor.endpoints ? (vendor.endpoints.image||"") : "";
   el("vf-ep-video").value = vendor && vendor.endpoints ? (vendor.endpoints.video||"") : "";
+  el("vf-ep-audio").value = vendor && vendor.endpoints ? (vendor.endpoints.audio||"") : "";
   el("vf-options").value = (vendor && vendor.options && Object.keys(vendor.options).length)
     ? JSON.stringify(vendor.options, null, 2) : "";
   syncOptionsBox();
   renderKeyFields(vendor);
   /* 表单在厂商列表下面，列表一长就跑到屏幕外去了 —— 不滚过去的话，
      用户会觉得"点了没反应"。 */
-  try{ el("vendor-form").scrollIntoView({behavior:"smooth", block:"start"}); }catch(e){}
+  /* 用即时滚动而不是 smooth：动画在部分环境/省电模式下不触发，
+     表单会停在视口外，用户看到的就是"点了没反应"。 */
+  try{ el("vendor-form").scrollIntoView({block:"start"}); }catch(e){}
 }
 
 /* 厂商的类型不在内置目录里时，表单会一个密钥输入框都渲染不出来 ——
@@ -833,7 +1053,8 @@ function collectVendorPayload(){
     api_key: keys[0] || "",
     endpoints: {
       image: el("vf-ep-image").value.trim(),
-      video: el("vf-ep-video").value.trim()
+      video: el("vf-ep-video").value.trim(),
+      audio: el("vf-ep-audio").value.trim()
     },
     options: collectOptions()
   };
@@ -854,7 +1075,9 @@ async function saveVendor(){
     const payload = collectVendorPayload();
     const res = await api("/api/vendor", {method:"POST", body:JSON.stringify(payload)});
     await loadAll();
-    showVendorForm(vendorById(res.id));
+    closeVendorForm();
+    const list = el("vendor-list");
+    try{ list.scrollIntoView({behavior:"smooth", block:"start"}); }catch(e){}
     showToast(res.message || "厂商已保存");
   }catch(e){ showError("保存失败："+e.message); }
   finally{ btn.disabled = false; }
@@ -894,30 +1117,16 @@ async function testVendor(input){
 
 /* ------------------------------------------------------------------ 模型 */
 /* 页面展示必须和 selector.py 的口径一致：
-   - priority_then_weight：只有最低优先级档参与"首选"，同档按权重分流；更高档是备用。
-   - weight_only：忽略优先级，所有启用模型按权重全局分流。
-   - fallback_chain：严格按 (priority, -weight) 排序，不随机。
+   - 只有最低优先级档参与"首选"，同档按权重分流；更高优先级数字的档是备用。
    - native：调度器强制排到最后且不占重试预算，所以不参与真实模型的占比。
    早期版本把"同档内占比"直接叫"选中概率"，于是每个档只有一个模型时人人 100%，
    优先级完全不同的模型看起来机会一样 —— 这是用户实际踩过的坑。 */
-function strategyOf(kind){
-  const s = (state.strategies||{})[kind];
-  return (s==="weight_only"||s==="fallback_chain") ? s : "priority_then_weight";
-}
-
-const STRATEGY_HELP = {
-  priority_then_weight: "按优先级：只在最低优先级档内按权重随机，低档仅作备用。",
-  weight_only: "全局权重：忽略优先级，所有可用模型按权重一起随机。",
-  fallback_chain: "严格顺位：按优先级和权重固定排序，不随机；失败时按顺序降级。",
-};
-
 function routingInfo(kind){
-  const strategy = strategyOf(kind);
   const enabled = (state.models[kind]||[]).filter(m=>m.enabled);
   const real = enabled.filter(m=>String(m.provider||"")!=="native");
   const natives = enabled.filter(m=>String(m.provider||"")==="native");
   const info = {
-    strategy: strategy, shares:{}, ranks:{}, order:[], activeTier:null,
+    shares:{}, activeTier:null,
     nativeOnly: enabled.length>0 && real.length===0, zeroWeight:false,
     pool: [], missingKey: [], cooling: [], coolingRelaxed: false, poolEmpty: false,
     nativeFallback: false,
@@ -942,26 +1151,6 @@ function routingInfo(kind){
   info.pool = pool;
   if(!pool.length) return info;
   const weight = m=>Math.max(0, Number(m.weight||0));
-  if(strategy==="weight_only"){
-    const total = pool.reduce((s,m)=>s+weight(m),0);
-    if(total>0){
-      pool.forEach(m=>{ info.shares[m.id] = weight(m)/total; });
-    }else{
-      /* selector 的 weighted_shuffle 在总权重为 0 时会按列表原顺序取，
-         所以第一个才是"会被先选中"的那个，不能给所有人显示 0%。 */
-      pool.forEach((m,i)=>{ info.shares[m.id] = i===0 ? 1 : 0; });
-      info.zeroWeight = true;
-    }
-    return info;
-  }
-  if(strategy==="fallback_chain"){
-    info.order = pool.slice().sort((a,b)=>
-      (Number(a.priority)-Number(b.priority)) ||
-      (weight(b)-weight(a)) ||
-      String(a.id).localeCompare(String(b.id)));
-    info.order.forEach((m,i)=>{ info.ranks[m.id]=i+1; });
-    return info;
-  }
   info.activeTier = Math.min.apply(null, pool.map(m=>Number(m.priority)));
   const tier = pool.filter(m=>Number(m.priority)===info.activeTier);
   const total = tier.reduce((s,m)=>s+weight(m),0);
@@ -998,12 +1187,6 @@ function metricOf(m, info){
   }
   if(String(m.provider||"")==="native"){
     return {text:"最后兜底（不参与真实模型分流）", pct:null};
-  }
-  if(info.strategy==="weight_only"){
-    return {text:"分流占比 "+shareText(m,info), pct:info.shares[m.id]||0};
-  }
-  if(info.strategy==="fallback_chain"){
-    return {text:"顺位 "+(info.ranks[m.id]||"-")+"（严格顺序，不随机）", pct:null};
   }
   if(Number(m.priority)===info.activeTier){
     return {text:"首选概率 "+shareText(m,info), pct:info.shares[m.id]||0};
@@ -1042,17 +1225,6 @@ function kindSummaryHtml(kind){
   const prefix = info.coolingRelaxed
     ? '<b>全部可用真实模型熔断中</b> · 按最早恢复强制尝试 · '
     : '';
-  if(info.strategy==="weight_only"){
-    const zero = info.zeroWeight
-      ? ' <span class="hint">（权重合计为 0，按配置顺序取第一个）</span>' : '';
-    return prefix+'<b>权重全局分流</b>（忽略优先级）：'+
-      pool.map(m=>esc(m.label||m.model)+' <span class="mono">'+shareText(m,info)+'</span>').join(" · ")+
-      zero+excludedHint;
-  }
-  if(info.strategy==="fallback_chain"){
-    return prefix+'<b>严格顺位</b>（不随机）：'+
-      info.order.map((m,i)=>(i+1)+'. '+esc(m.label||m.model)).join(" → ")+excludedHint;
-  }
   const active = pool.filter(m=>Number(m.priority)===info.activeTier);
   const backupTiers = Array.from(new Set(
     pool.filter(m=>Number(m.priority)!==info.activeTier).map(m=>Number(m.priority))
@@ -1073,21 +1245,36 @@ function renderProbability(){
   const box = el("prob-summary");
   const kind = pick.activeKind;
   box.innerHTML = kind ? kindSummaryHtml(kind) : "";
-  const s = kind ? strategyOf(kind) : "priority_then_weight";
-  const select = el("strategy-select");
-  if(select){
-    select.value = s;
-    select.title = "当前策略："+s;
-    select.disabled = !kind;
-  }
-  const hint = el("strategy-hint");
-  if(hint) hint.textContent = kind ? (STRATEGY_HELP[s] || "") : "";
 }
 
 function renderModelCard(m, info){
   const native = String(m.provider||"")==="native";
-  const extra = (m.supports||[]).some(s=>s.indexOf("img2")===0);
   const metric = metricOf(m, info);
+  /* 功能标签：一个模型吃什么、吐什么。放在名字后面，agent（和人）扫一眼就知道
+     该用它接哪类任务。老数据没有这两个字段时按类目 + supports 推默认值。
+     内置兜底（native）不贴这个标签 —— 它不调接口，只是把请求交回给 AI 助手
+     自己的工具，贴上「输入 文本/图片 → 输出 图片」会让人误以为它是个真模型。 */
+  const supList = m.supports || [];
+  /* 没有 kind 字段的老数据（测试夹具）按 supports 猜：video 结尾是视频，
+     audio 结尾是语音，其余按图像处理。 */
+  const supKind = m.kind || (supList.some(s=>String(s).slice(-5)==="video") ? "video"
+    : (supList.some(s=>String(s).slice(-5)==="audio") ? "audio" : "image"));
+  function modsOf(which){
+    const raw = which==="input" ? m.input_modalities : m.output_modalities;
+    if(Array.isArray(raw) && raw.length) return raw;
+    if(which==="output") return [supKind==="video" ? "video" : (supKind==="audio" ? "audio" : "image")];
+    return supList.some(s=>String(s).indexOf("img2")===0) ? ["text","image"] : ["text"];
+  }
+  const MOD_TXT = {text:"文本", image:"图片", video:"视频", audio:"音频"};
+  /* 多个模态用「/」分隔（文本/图片）。以前用间隔号「·」，夹在两个全角
+     中文之间时和顿号长得很像，念起来也断不开。 */
+  const modTxt = arr=>arr.map(v=>MOD_TXT[v]||v).join("/");
+  const inMods = modsOf("input"), outMods = modsOf("output");
+  const modality = (native || (!inMods.length && !outMods.length)) ? '' :
+    ' <span class="badge mod" title="输入模态 → 输出模态：这个模型能接受什么、产出什么">'+
+    '<span class="mod-k">输入</span> <span class="mod-v">'+esc(modTxt(inMods))+'</span>'+
+    '<span class="mod-arrow">→</span>'+
+    '<span class="mod-k">输出</span> <span class="mod-v">'+esc(modTxt(outMods))+'</span></span>';
   const builtin = native
     ? ' <span class="badge" title="内置工具兜底：不调接口、不花钱、不能编辑，只能隐藏">内置</span>'
     : '';
@@ -1118,10 +1305,16 @@ function renderModelCard(m, info){
     ? '<div class="hint" style="margin-top:2px">不调接口、不花钱、不出图；'+
       '只在真实模型都不可用时，把请求交给 AI 助手的内置工具。不能编辑，只能隐藏。</div>'
     : '';
+  /* 语音模型暂时没有「测试」：连通性探测是按图像/视频的只读端点设计的，
+     拿它测 TTS 只会给出误导性的结论，等适配器接好再放开。 */
+  const canTest = !native && m.kind !== "audio";
   const actions = native
     ? '<button class="sm" data-act="hide-model" data-mid="'+esc(m.id)+'">'+
         (m.enabled?'隐藏':'恢复显示')+'</button>'
-    : '<button class="sm" data-act="test-model" data-mid="'+esc(m.id)+'">测试</button>'+
+    : (canTest
+        ? '<button class="sm" data-act="test-model" data-mid="'+esc(m.id)+'">测试连通性</button>'+
+          '<button class="sm" data-act="real-test-model" data-mid="'+esc(m.id)+'">真实测试</button>'
+        : '')+
       '<button class="sm" data-act="edit-model" data-mid="'+esc(m.id)+'">编辑</button>'+
       '<button class="sm danger" data-act="del-model" data-mid="'+esc(m.id)+'">'+
         (m.from_base?'隐藏':'删除')+'</button>';
@@ -1131,13 +1324,15 @@ function renderModelCard(m, info){
         ' data-act="toggle-model" data-mid="'+esc(m.id)+'" aria-label="启用或停用 '+esc(m.label||m.model)+
         '"><span></span></label>')+
     '<div class="info"><div class="nm">'+esc(m.label||m.model)+
-      (extra?' <span class="badge tag">支持图生</span>':'')+builtin+hidden+handwritten+healthBadge+'</div>'+
+      modality+builtin+hidden+handwritten+healthBadge+'</div>'+
     '<div class="meta"><span class="mono">'+esc(m.model)+'</span> &middot; '+
       owner+' &middot; 权重 '+m.weight+' &middot; 优先级 '+m.priority+' &middot; '+
       '<b style="font-weight:500">'+esc(metric.text)+'</b></div>'+
     explain+
     '</div>'+
-    actions+
+    /* 按钮收进一个容器：窄屏时整体换到下一行，
+       否则会按剩余空间零散折行（出现过「测试连通性」独占一行、其余三个挤下一行）。 */
+    '<div class="actions-row">'+actions+'</div>'+
     '</div>';
 }
 
@@ -1147,7 +1342,7 @@ function renderModels(){
     if(!box) return;
     const list = state.models[kind]||[];
     if(!list.length){
-      box.innerHTML = '<div class="empty">还没有'+(kind==="image"?"图像":"视频")+'模型。</div>';
+      box.innerHTML = '<div class="empty">还没有'+kindName(kind).replace("模型","")+'模型。</div>';
       return;
     }
     const info = routingInfo(kind);
@@ -1155,45 +1350,29 @@ function renderModels(){
     const natives = list.filter(m=>String(m.provider||"")==="native");
     let html = "";
 
-    if(info.strategy==="weight_only"){
-      const excluded = (info.missingKey.length || info.cooling.length)
-        ? "（缺 Key / 熔断中的已排除）" : "";
-      const sub = info.zeroWeight
-        ? "忽略优先级 · 权重合计为 0，会按配置顺序取第一个"+excluded
-        : "忽略优先级 · 所有可用模型按权重全局分流"+excluded;
-      html += tierHeader("权重分流", "accent", sub);
-      const sorted = real.slice().sort((a,b)=>Number(b.weight||0)-Number(a.weight||0));
-      html += sorted.map(m=>renderModelCard(m, info)).join("");
-    }else{
-      const tiers = Array.from(new Set(real.map(m=>Number(m.priority)))).sort((a,b)=>a-b);
-      tiers.forEach(p=>{
-        const group = real.filter(m=>Number(m.priority)===p);
-        const groupEnabled = group.some(m=>m.enabled);
-        const groupUsable = group.some(m=>m.enabled &&
-          !(m.needs_api_key && m.api_key_ready === false) &&
-          !(m.cooling && !info.coolingRelaxed));
-        if(!groupEnabled){
-          /* 整档都被停用：不要给它挂「首选/备用」的标签，否则用户会以为
-             这一档还在参与调度。 */
-          html += tierHeader("优先级 "+p, "idle", "全部停用 · 不参与调度");
-        }else if(!groupUsable){
-          html += tierHeader("优先级 "+p, "idle", "全部不可用 · 缺 Key 或熔断中");
-        }else if(info.strategy==="fallback_chain"){
-          /* 按调度器的真实顺位排，而不是按配置里的书写顺序 —— 同优先级下
-             权重大的排前面，权重相同再按 id，和 selector.py 完全一致。 */
-          group.sort((a,b)=>(info.ranks[a.id]||9999)-(info.ranks[b.id]||9999));
-          html += tierHeader("优先级 "+p, "idle", "严格顺序 · 同档按权重从大到小");
-        }else if(p===info.activeTier){
-          const sub = info.zeroWeight
-            ? "首选 · 本档权重合计为 0，按配置顺序取第一个"
-            : "首选 · 同档按权重分流";
-          html += tierHeader("优先级 "+p, "ok", sub);
-        }else{
-          html += tierHeader("优先级 "+p, "idle", "备用 · 前序档位不可用时启用");
-        }
-        html += group.map(m=>renderModelCard(m, info)).join("");
-      });
-    }
+    const tiers = Array.from(new Set(real.map(m=>Number(m.priority)))).sort((a,b)=>a-b);
+    tiers.forEach(p=>{
+      const group = real.filter(m=>Number(m.priority)===p);
+      const groupEnabled = group.some(m=>m.enabled);
+      const groupUsable = group.some(m=>m.enabled &&
+        !(m.needs_api_key && m.api_key_ready === false) &&
+        !(m.cooling && !info.coolingRelaxed));
+      if(!groupEnabled){
+        /* 整档都被停用：不要给它挂「首选/备用」的标签，否则用户会以为
+           这一档还在参与调度。 */
+        html += tierHeader("优先级 "+p, "idle", "全部停用 · 不参与调度");
+      }else if(!groupUsable){
+        html += tierHeader("优先级 "+p, "idle", "全部不可用 · 缺 Key 或熔断中");
+      }else if(p===info.activeTier){
+        const sub = info.zeroWeight
+          ? "首选 · 本档权重合计为 0，按配置顺序取第一个"
+          : "首选 · 同档按权重分流";
+        html += tierHeader("优先级 "+p, "ok", sub);
+      }else{
+        html += tierHeader("优先级 "+p, "idle", "备用 · 前序档位不可用时启用");
+      }
+      html += group.map(m=>renderModelCard(m, info)).join("");
+    });
 
     if(natives.length){
       const anyEnabled = natives.some(m=>m.enabled);
@@ -1206,8 +1385,9 @@ function renderModels(){
   updateKindCounts();
 }
 
+const KIND_NAMES = {image:"图像模型", video:"视频模型", audio:"语音模型"};
 function kindName(kind){
-  return kind==="image" ? "图像模型" : (kind==="video" ? "视频模型" : kind);
+  return KIND_NAMES[kind] || kind;
 }
 
 function updateKindCounts(){
@@ -1263,7 +1443,7 @@ async function setActiveKind(kind, opts){
 }
 
 function renderModelGroups(){
-  const kinds = state.kinds.length ? state.kinds : ["image","video"];
+  const kinds = state.kinds.length ? state.kinds : ["image","video","audio"];
   if(kinds.indexOf(pick.activeKind) < 0) pick.activeKind = kinds[0];
   const tabs = el("kind-tabs");
   tabs.innerHTML = kinds.map(kind=>{
@@ -1274,8 +1454,17 @@ function renderModelGroups(){
       '<span class="kc" id="kind-count-'+esc(kind)+'"></span></button>';
   }).join("");
   el("model-list").innerHTML = kinds.map(kind=>{
+    /* 语音页说清楚支持范围：百炼和 OpenAI 兼容两条通路能真跑，其余平台协议不同。
+       不写这句，用户拿火山的 TTS 配上去，只会拿到一句「未接适配器」的报错。 */
+    const note = (kind==="audio")
+      ? '<div class="note">语音已支持生成：<b>百炼</b>（qwen-audio-*-tts-* / qwen3-tts-*）、'+
+        '<b>OpenAI 兼容</b>（/v1/audio/speech）、<b>可灵</b>（/audio/tts，音色 voice_id）和 '+
+        '<b>火山·豆包语音</b>（v3 单向流式，音色 speaker）。音色、格式这些写进「生成规格」即可；'+
+        'replicate、fal 等平台的 TTS 协议不同，暂未接入。</div>'
+      : '';
     return '<div class="model-page'+(kind===pick.activeKind?" on":"")+'" role="tabpanel"'+
-      ' data-kind="'+esc(kind)+'"><div class="mlist" id="model-list-'+esc(kind)+'"></div></div>';
+      ' data-kind="'+esc(kind)+'">'+note+
+      '<div class="mlist" id="model-list-'+esc(kind)+'"></div></div>';
   }).join("");
   tabs.onclick = ev => guarded("切换模型页", async () => {
     const btn = ev.target.closest(".kind-tab");
@@ -1320,6 +1509,15 @@ function onVendorPick(){
 }
 function kindList(arr){ return arr.map(s=>'<option value="'+esc(s)+'">').join(""); }
 
+/* 收起表单回到列表。保存/取消都走这里：
+   之前保存成功后调用的是 showModelForm(null)，等于又开了一个空白"添加"表单，
+   用户会以为没保存成功，或者以为页面卡在配置里出不去。 */
+function closeModelForm(){
+  const form = el("model-form");
+  if(form) form.style.display = "none";
+  pick.editingModel = null;
+}
+
 function showModelForm(model){
   if(!state.vendors.length && !(model && !model.vendor)){
     showError("请先添加并保存一个厂商，再回来添加模型。");
@@ -1332,10 +1530,21 @@ function showModelForm(model){
   pick.editingModel = model ? model.id : null;
   el("mf-title").textContent = (model ? "编辑" : "添加") + kindName(kind);
   el("model-form").style.display = "block";
-  el("mf-result").innerHTML = "";
   fillVendorSelect(model);
   el("mf-id").value = model ? model.id : "";
   const params = (model && model.params) || {};
+  /* 模态先定好再 setKind：setKind 会按类目重绘选项，用的就是 pick 里的当前值。
+     老数据没有这两个字段时给默认标签；从别的类目切过来还可能留着不合法的值
+     （视频的「视频」标签挂到图像模型上），这里统一过滤一遍。 */
+  const conf = modalityConf(kind);
+  const fallback = modalityDefaults(kind);
+  function pickMods(which){
+    const raw = model ? (which==="input" ? model.input_modalities : model.output_modalities) : null;
+    const list = (Array.isArray(raw) ? raw : []).filter(v=>conf[which].indexOf(v) >= 0);
+    return list.length ? list : fallback[which].slice();
+  }
+  pick.inputMods = pickMods("input");
+  pick.outputMods = pickMods("output");
   if(model){
     el("mf-vendor").value = model.vendor || "";
     el("mf-model").value = model.model || "";
@@ -1343,7 +1552,6 @@ function showModelForm(model){
     el("mf-weight").value = model.weight;
     el("mf-weight-range").value = Math.min(100, Math.max(1, model.weight));
     el("mf-label").value = model.label && model.label!==model.model ? model.label : "";
-    el("mf-extra").checked = (model.supports||[]).some(s=>s.indexOf("img2")===0);
     setKind(kind);
   }else{
     el("mf-model").value = "";
@@ -1351,28 +1559,121 @@ function showModelForm(model){
     el("mf-weight").value = 50;
     el("mf-weight-range").value = 50;
     el("mf-label").value = "";
-    el("mf-extra").checked = false;
     setKind(kind);
   }
-  /* ③ 生成规格回填：preset 里没有的值归到「自定义…」 */
+  /* ④ 生成规格回填：preset 里没有的值归到「自定义…」 */
   fillPreset("mf-size-preset", "mf-size-custom", String(params.size || ""));
   fillPreset("mf-resolution", "mf-resolution-custom", String(params.resolution || ""));
   fillPreset("mf-duration", "mf-duration-custom",
     params.duration!==undefined && params.duration!=="" ? String(params.duration) : "");
+  el("mf-voice").value = params.voice ? String(params.voice) : "";
+  el("mf-speed").value =
+    params.speed!==undefined && params.speed!=="" ? String(params.speed) : "";
+  fillSelectValue("mf-audio-format", params.format ? String(params.format) : "");
   syncPresetCustom("mf-size-preset", "mf-size-custom");
   syncPresetCustom("mf-resolution", "mf-resolution-custom");
   syncPresetCustom("mf-duration", "mf-duration-custom");
   el("mf-w-label").textContent = el("mf-weight").value;
   onVendorPick();
+  /* 表单在模型列表下方。从卡片点「编辑」时如果页面上已经展开了测试结果卡，
+     表单会落在视口外 —— 用户看到的就是"点了没反应"。这里主动滚过去。 */
+  try{ el("model-form").scrollIntoView({block:"start"}); }catch(e){}
 }
 
 function setKind(kind){
   pick.kind = kind;
   /* 类型不再由用户选：新增时由当前页面固定，编辑时由模型本身固定。
-     这里只负责切换下方的生成规格块（尺寸 / 清晰度+时长）。 */
+     这里只负责切换下方的生成规格块（尺寸 / 清晰度+时长）。
+     模态的可选项也跟着类目变：图像模型只有文本/图片，视频模型四种都有。 */
   el("mf-spec-image").style.display = (kind==="image") ? "" : "none";
   el("mf-spec-video").style.display = (kind==="video") ? "" : "none";
+  el("mf-spec-audio").style.display = (kind==="audio") ? "" : "none";
+  syncModalityHint(kind);
+  renderModalityChips();
   onVendorPick();
+}
+
+/* ------------------------------------------------------------------ 模态 */
+/* 模态下方的说明随类目变。原来固定写「勾图片 = 图生图/图生视频」，
+   切到语音模型时那句话就完全不成立了。 */
+function syncModalityHint(kind){
+  const tail = {
+    image: "输入里勾上「图片」，就会同时标成支持图生图。",
+    video: "输入里勾上「图片」，就会同时标成支持图生视频。",
+    audio: "「文本 → 音频」= 语音合成；输入再加「音频」= 支持语音克隆 / 变声。"
+  }[kind] || "";
+  el("mf-mods-hint").textContent =
+    "功能标签：告诉 AI 助手这个模型吃什么、吐什么，它才好挑对模型。" + tail;
+}
+
+/* 可选集合跟后端 config.MODALITY_OPTIONS 是同一套规则：
+   图像模型只有「文本 / 图片」，视频模型四种都有。改规则记得两边一起改。
+   这两组值只是功能标签，存盘用英文键（text/image/video/audio），
+   配置文件稳定、agent 读 JSON 也好判断；页面上再翻成中文。 */
+const MODALITY_OPTIONS = {
+  image:{input:["text","image"], output:["text","image"]},
+  video:{input:["text","image","video","audio"], output:["text","image","video","audio"]},
+  /* 语音：TTS 文本进、音频出；ASR 反过来；语音克隆要多选「音频」输入 */
+  audio:{input:["text","audio"], output:["text","audio"]}
+};
+const MODALITY_LABELS = {text:"文本", image:"图片", video:"视频", audio:"音频"};
+
+function modalityConf(kind){
+  return MODALITY_OPTIONS[kind] || MODALITY_OPTIONS.image;
+}
+
+/* 默认标签：图像模型「文本→图片」，视频模型「文本→视频」。
+   老配置（升级前没有这两个字段）也按这个规则显示，不会出现空白。 */
+function modalityDefaults(kind){
+  if(kind==="video") return {input:["text"], output:["video"]};
+  if(kind==="audio") return {input:["text"], output:["audio"]};
+  return {input:["text"], output:["image"]};
+}
+
+function modsSelected(which){
+  return (which==="input" ? pick.inputMods : pick.outputMods) || [];
+}
+
+function renderModalityChips(){
+  const conf = modalityConf(pick.kind || "image");
+  [["mf-in-mods","input"],["mf-out-mods","output"]].forEach(pair=>{
+    const box = el(pair[0]);
+    if(!box) return;
+    const selected = modsSelected(pair[1]);
+    box.innerHTML = conf[pair[1]].map(v=>{
+      const on = selected.indexOf(v) >= 0;
+      /* 是 button 就必须有 type，否则在 form 里会被当成提交按钮；
+         aria-pressed 让读屏能说出"已选中/未选中"。 */
+      return '<button type="button" class="mod-chip'+(on?" on":"")+'"'+
+        ' data-mod="'+esc(v)+'" aria-pressed="'+(on?"true":"false")+'"'+
+        ' title="'+esc(MODALITY_LABELS[v]||v)+(on?"：已选中，点击取消":"：点击选中")+'">'+
+        esc(MODALITY_LABELS[v]||v)+'</button>';
+    }).join("");
+  });
+}
+
+/* 点一下切换。允许全不选就等于"这个模型不吃任何输入"，没有意义，
+   所以最后一个保持选中并明确告诉用户为什么点不掉。 */
+function toggleModality(which, value){
+  const conf = modalityConf(pick.kind || "image");
+  const key = which==="input" ? "inputMods" : "outputMods";
+  const order = conf[which] || [];
+  if(order.indexOf(value) < 0) return;
+  const list = (pick[key] || []).slice();
+  const at = list.indexOf(value);
+  if(at >= 0){
+    if(list.length === 1){
+      showError((which==="input" ? "输入" : "输出")+"模态至少要留一个，否则这个模型没有可用的方向。");
+      return;
+    }
+    list.splice(at, 1);
+  }else{
+    list.push(value);
+    /* 按固定顺序存，避免"先点图片再点文本"和反过来写出两种顺序 */
+    list.sort((a,b)=>order.indexOf(a)-order.indexOf(b));
+  }
+  pick[key] = list;
+  renderModalityChips();
 }
 
 /* 回填一个「预设下拉 + 自定义手填框」组合。
@@ -1384,6 +1685,20 @@ function fillPreset(selectId, customId, value){
   const known = Array.from(select.options).some(o=>o.value===value && o.value!=="custom");
   select.value = value ? (known ? value : "custom") : "";
   el(customId).value = (value && !known) ? value : "";
+}
+
+/* 回填一个普通下拉。值不在选项里（手写了 ogg 这种没列出来的格式）时补一个临时
+   选项，否则 select.value 会被浏览器置空 —— 用户编辑一次就把这个参数静默删掉了。 */
+function fillSelectValue(selectId, value){
+  const select = el(selectId);
+  if(!value){ select.value = ""; return; }
+  if(!Array.from(select.options).some(o=>o.value===value)){
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = value + "（配置文件里的值）";
+    select.appendChild(opt);
+  }
+  select.value = value;
 }
 
 /* 选了「自定义…」才显示手填框 */
@@ -1404,9 +1719,26 @@ function collectModelPayload(){
   const name = el("mf-model").value.trim();
   if(!name) throw new Error("请填写模型名称");
   const kind = pick.kind;
-  const supports = [kind==="image" ? "text2img" : "text2video"];
-  if(el("mf-extra").checked) supports.push(kind==="image" ? "img2img" : "img2video");
-  /* ③ 生成规格 → params。表单管辖的键始终提交：空串表示"清掉这个键"（回到平台默认），
+  const inputMods = (pick.inputMods || []).slice();
+  const outputMods = (pick.outputMods || []).slice();
+  if(!inputMods.length) throw new Error("请至少给这个模型选一个输入模态");
+  if(!outputMods.length) throw new Error("请至少给这个模型选一个输出模态");
+  /* supports（路由过滤用）从输入模态推导，不再单独让用户勾 ——
+     同一个事实两个开关只会打架：勾了「图片」输入却写着不支持图生图，
+     路由就会把一个其实能用的模型排除掉。 */
+  const supports = [];
+  if(kind==="image"){
+    if(inputMods.indexOf("text")>=0) supports.push("text2img");
+    if(inputMods.indexOf("image")>=0) supports.push("img2img");
+  }else if(kind==="video"){
+    if(inputMods.indexOf("text")>=0) supports.push("text2video");
+    if(inputMods.indexOf("image")>=0) supports.push("img2video");
+  }else{
+    /* 语音：文本→语音合成，音频→语音克隆/变声 */
+    if(inputMods.indexOf("text")>=0) supports.push("text2audio");
+    if(inputMods.indexOf("audio")>=0) supports.push("audio2audio");
+  }
+  /* ④ 生成规格 → params。表单管辖的键始终提交：空串表示"清掉这个键"（回到平台默认），
      后端 upsert_model 的合并规则靠这个语义实现"取消指定尺寸"。 */
   const params = {};
   if(kind==="image"){
@@ -1424,6 +1756,12 @@ function collectModelPayload(){
     if(duration==="custom") duration = el("mf-duration-custom").value.trim();
     if(duration && !/^\d+$/.test(duration)) throw new Error("自定义时长应填整数秒，例如 8");
     params.duration = duration ? parseInt(duration,10) : "";
+  }else if(kind==="audio"){
+    params.voice = el("mf-voice").value.trim();
+    const speed = el("mf-speed").value.trim();
+    if(speed && !/^(\d+(\.\d+)?|\.\d+)$/.test(speed)) throw new Error("语速要填数字，例如 1.0");
+    params.speed = speed ? parseFloat(speed) : "";
+    params.format = el("mf-audio-format").value || "";
   }
   return {
     id: el("mf-id").value || "",
@@ -1435,6 +1773,8 @@ function collectModelPayload(){
     weight: parseFloat(el("mf-weight").value||"50"),
     enabled: true,
     supports: supports,
+    input_modalities: inputMods,
+    output_modalities: outputMods,
     params: params
   };
 }
@@ -1448,12 +1788,18 @@ async function saveModel(){
     /* 保存后如果落到另一个类目（只有老页面/手写配置才可能出现），
        自动切到那个页面，用户能立刻看到刚保存的模型。 */
     if(res.kind && res.kind!==pick.activeKind) await setActiveKind(res.kind, {force:true});
-    showModelForm(null);
+    closeModelForm();
+    /* 表单在列表下方，收起后页面可能停在一片空白上，把列表滚回视野。 */
+    const list = el("model-list");
+    try{ list.scrollIntoView({behavior:"smooth", block:"start"}); }catch(e){}
     showToast(res.message || "模型已保存");
   }catch(e){ showError("保存失败："+e.message); }
   finally{ btn.disabled = false; }
 }
 
+/* box 既可以是元素，也可以是一个返回元素的函数。
+   传函数时会在**确认之后**才创建结果区 —— 真实测试要先问一句"要花额度"，
+   提前建盒子的话，用户点取消会留下一张空卡片，还会把上一次的测试结果顶掉。 */
 async function testModel(box, payload, deep){
   /* 两种模式：
      轻量（默认）—— 只读预检，不花钱；
@@ -1466,6 +1812,7 @@ async function testModel(box, payload, deep){
     );
     if(!ok) return;
   }
+  if(typeof box === "function") box = box();
   box.innerHTML = '<div class="note"><span class="spin"></span>'+
     (deep ? "正在真实生成一次（会消耗额度，请稍等）…"
           : "正在测试…（不会生成任何内容，不消耗额度）")+'</div>';
@@ -1499,6 +1846,11 @@ async function testModel(box, payload, deep){
         }else if(/\.(mp4|webm)$/.test(low)){
           html += '<video class="preview" controls src="/api/file?path='+encodeURIComponent(f)+
             '"></video>';
+        }else if(/\.(wav|mp3|m4a|ogg|flac)$/.test(low)){
+          /* 语音接通后，真实测试的产物也在这里回显。没有这一支的话，
+             用户只看到一行 wav 路径，听不到效果，等于没测。 */
+          html += '<audio class="preview" controls style="width:100%" src="/api/file?path='+
+            encodeURIComponent(f)+'"></audio>';
         }
       }
       box.innerHTML = html;
@@ -1563,7 +1915,7 @@ document.querySelectorAll(".tab").forEach(t=>{
 });
 
 el("btn-add-vendor").addEventListener("click", ()=>showVendorForm(null));
-el("btn-cancel-vendor").addEventListener("click", ()=>{ el("vendor-form").style.display="none"; });
+el("btn-cancel-vendor").addEventListener("click", closeVendorForm);
 el("btn-save-vendor").addEventListener("click", saveVendor);
 el("btn-test-vendor").addEventListener("click", ()=>{
   testVendor({box:el("vf-result"), kind:"image"});
@@ -1578,7 +1930,7 @@ function selectProvider(pkey){
   /* 只替换"还停在上一个平台默认值"的地址。用户自己填过的中转站/网关地址不能
      被静默冲掉 —— 冲掉之后框里显示的是 api.openai.com 这种官方默认值，看着像
      系统给的，用户不会去怀疑它，然后拿中转站的密钥敲官网，必然 401。 */
-  ["image","video"].forEach(k=>{
+  ["image","video","audio"].forEach(k=>{
     const input = el("vf-ep-"+k);
     const typed = input.value.trim();
     const wasDefault = (prev && prev.endpoints && prev.endpoints[k]) || "";
@@ -1657,33 +2009,17 @@ el("btn-refresh").addEventListener("click", () => guarded("刷新配置", async 
     btn.textContent = label;
   }
 }));
-el("strategy-select").addEventListener("change", () => guarded("修改策略", async ()=>{
-  const sel = el("strategy-select");
-  const kind = pick.activeKind;
-  const strategy = sel.value;
-  const hint = el("strategy-hint");
-  if(hint) hint.textContent = STRATEGY_HELP[strategy] || "";
-  const label = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : strategy;
-  try{
-    await api("/api/strategy", {method:"POST", body:JSON.stringify({kind:kind, strategy:strategy})});
-    await loadAll();
-    showToast("策略已改为「"+label+"」");
-  }catch(e){
-    showError("修改策略失败："+e.message);
-    renderProbability();
-  }
-}));
-el("btn-cancel-model").addEventListener("click", ()=>{ el("model-form").style.display="none"; });
+el("btn-cancel-model").addEventListener("click", closeModelForm);
 el("btn-save-model").addEventListener("click", saveModel);
-el("btn-test-model").addEventListener("click", ()=>{
-  try{ testModel(el("mf-result"), collectModelPayload(), false); }
-  catch(e){ showError(e.message); }
-});
-el("btn-real-test-model").addEventListener("click", ()=>{
-  try{ testModel(el("mf-result"), collectModelPayload(), true); }
-  catch(e){ showError(e.message); }
-});
 el("mf-vendor").addEventListener("change", onVendorPick);
+/* 模态按钮是动态渲染的，用事件委托，不用每次重绘都重新绑一遍 */
+el("model-form").addEventListener("click", ev=>{
+  const chip = ev.target.closest(".mod-chip[data-mod]");
+  if(!chip) return;
+  ev.preventDefault();
+  const which = chip.closest("#mf-in-mods") ? "input" : "output";
+  toggleModality(which, chip.dataset.mod);
+});
 el("mf-size-preset").addEventListener("change", ()=>onPresetChange("mf-size-preset","mf-size-custom"));
 el("mf-resolution").addEventListener("change", ()=>onPresetChange("mf-resolution","mf-resolution-custom"));
 el("mf-duration").addEventListener("change", ()=>onPresetChange("mf-duration","mf-duration-custom"));
@@ -1739,6 +2075,12 @@ el("model-list").addEventListener("click", ev => guarded("模型操作", async (
   if(act==="test-model"){
     const box = resultBoxAfter(btn.closest(".mitem"), "model:"+mid);
     await testModel(box, {id:mid});
+    return;
+  }
+  if(act==="real-test-model"){
+    const item = btn.closest(".mitem");
+    /* 传函数：确认通过后才插结果卡，取消时列表保持原样 */
+    await testModel(() => resultBoxAfter(item, "model:"+mid), {id:mid}, true);
   }
 }));
 el("model-list").addEventListener("change", ev => guarded("切换模型状态", async ()=>{

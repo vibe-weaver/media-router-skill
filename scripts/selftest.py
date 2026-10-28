@@ -189,7 +189,7 @@ defaults:
     mode: metadata
 
 image:
-  strategy: fallback_chain
+  strategy: priority_then_weight
   models:
     - id: mock-broken
       provider: generic_http
@@ -867,7 +867,11 @@ def check_bugfixes(check) -> None:
     _mm = adapters.DASHSCOPE_QWEN_IMAGE
     _img_req = adapters.GenRequest(kind="image", prompt="p")
     _t2v = adapters.GenRequest(kind="video", prompt="p")
-    _i2v = adapters.GenRequest(kind="video", prompt="p", images=["a.png"])
+    # 输入图要真的存在：适配器会把本地路径读成 base64（以前是把路径当 URL
+    # 原样发出去，平台只会回 400）。这里只关心出站地址，给一个真文件即可。
+    _img_tmp = Path(tempfile.mkdtemp(prefix="mr-selftest-img-")) / "a.png"
+    _img_tmp.write_bytes(b"\x89PNG\r\n\x1a\n")
+    _i2v = adapters.GenRequest(kind="video", prompt="p", images=[str(_img_tmp)])
 
     def _ds(model: str, endpoint: str, req: Any = _img_req) -> str:
         return _outbound_url(
@@ -981,14 +985,15 @@ def check_bugfixes(check) -> None:
     # ------------------------------------------------ 叠加层不抹掉手写层（合并）
     # 叠加层只写了 strategy、没写 models 时，整体覆盖会把手写层这一整个类目的
     # 模型全部抹掉 —— 用户改个策略，模型全没了。
+    # 叠加层只写了 strategy、没写 models 时，整体覆盖会把手写层这一整个类目的
+    # 模型全部抹掉 —— 用户改个策略，模型全没了。（策略现在只剩一种，但合并语义不变）
     merged = config._merge_config(  # noqa: SLF001 - 自检就是要看合并语义本身
-        {"image": {"strategy": "fallback_chain", "models": [{"id": "a"}]}},
-        {"image": {"strategy": "weight_only"}},
+        {"image": {"strategy": "priority_then_weight", "models": [{"id": "a"}]}},
+        {"image": {"strategy": "priority_then_weight"}},
     )
     check(
-        "叠加层只改 strategy 时不会抹掉手写层的模型",
-        merged.get("image", {}).get("strategy") == "weight_only"
-        and [m.get("id") for m in merged["image"].get("models", [])] == ["a"],
+        "叠加层只写 strategy 时不会抹掉手写层的模型",
+        [m.get("id") for m in merged["image"].get("models", [])] == ["a"],
         str(merged.get("image")),
     )
     merged_vendors = config._merge_config(  # noqa: SLF001
@@ -2149,6 +2154,10 @@ def check_bugfixes_round2(check) -> None:
     if isinstance(_shipped_data, dict):
         for _kind, _pool in _shipped_data.items():
             if not isinstance(_pool, dict) or not isinstance(_pool.get("models"), list):
+                continue
+            # 语音池出厂是空的：agent 那边没有标准的"内置语音工具"，
+            # 挂一个指向不存在工具的兜底，比直接说"没配语音模型"更误导人。
+            if str(_kind) == "audio":
                 continue
             if not any(
                 isinstance(_m, dict)

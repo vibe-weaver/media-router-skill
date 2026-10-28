@@ -74,23 +74,26 @@ CATALOG: list[ProviderEntry] = [
         key="volcengine",
         label="火山方舟（即梦 / Seedance）",
         provider="volcengine",
-        beginner="字节跳动自家的方舟协议，只能连火山官方地址 —— 用中转站/自建网关请选「OpenAI 及兼容网关」。出图用即梦（Seedream），出视频用 Seedance，国内直连。",
-        kinds=["image", "video"],
+        beginner="字节跳动自家的方舟协议，只能连火山官方地址 —— 用中转站/自建网关请选「OpenAI 及兼容网关」。出图用即梦（Seedream），出视频用 Seedance，国内直连。语音合成属于**豆包语音**（另一个服务、另一套 Key），要单独加一个厂商条目。",
+        kinds=["image", "video", "audio"],
         key_fields=[
             KeyField(
                 env="ARK_API_KEY",
                 label="方舟 API Key",
                 placeholder="粘贴你的 API Key",
-                hint="火山方舟控制台 → API Key 管理 → 创建",
+                hint="火山方舟控制台 → API Key 管理 → 创建。注意：语音合成要用「语音技术」的 Key（或旧版 appid:token），两者的 Key 不通用，语音请单独加一个厂商条目",
             )
         ],
         endpoints={
             "image": f"{ARK}/images/generations",
             "video": f"{ARK}/contents/generations/tasks",
+            # 语音在另一个域名（豆包语音），V3 单向流式接口
+            "audio": "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
         },
         suggestions={
             "image": ["doubao-seedream-3-0-t2i-250415"],
             "video": ["doubao-seedance-1-0-pro-250528"],
+            "audio": ["doubao-tts"],
         },
         auth_check={"url": f"{ARK}/contents/generations/tasks?page_size=1", "auth": "bearer"},
         # 方舟确实有列模型的接口（ListFoundationModels），但它要 AccessKey/SecretKey
@@ -110,8 +113,8 @@ CATALOG: list[ProviderEntry] = [
         key="dashscope",
         label="阿里云百炼（通义万相）",
         provider="dashscope",
-        beginner="阿里云自家的百炼协议，只能连百炼官方地址，中转站不适用。通义万相出图、也能出视频，有免费额度。",
-        kinds=["image", "video"],
+        beginner="阿里云自家的百炼协议，只能连百炼官方地址，中转站不适用。通义万相出图、出视频，通义千问出图，还能做语音合成（qwen-audio-tts / qwen3-tts），有免费额度。",
+        kinds=["image", "video", "audio"],
         key_fields=[
             KeyField(
                 env="DASHSCOPE_API_KEY",
@@ -123,10 +126,16 @@ CATALOG: list[ProviderEntry] = [
         endpoints={
             "image": f"{DASHSCOPE}/services/aigc/text2image/image-synthesis",
             "video": f"{DASHSCOPE}/services/aigc/video-generation/video-synthesis",
+            # 语音合成的端点按模型分两套（互不通用）：
+            #   qwen-audio-*-tts-* / cosyvoice-* → /services/audio/tts/SpeechSynthesizer
+            #   qwen3-tts-*                      → /services/aigc/multimodal-generation/generation
+            # 这里登记的是前者，适配器会按模型名自动切到后者。
+            "audio": f"{DASHSCOPE}/services/audio/tts/SpeechSynthesizer",
         },
         suggestions={
             "image": ["wanx2.5-t2i-turbo", "wanx2.1-t2i-turbo"],
             "video": ["wanx2.1-t2v-turbo"],
+            "audio": ["qwen-audio-3.1-tts-flash", "qwen3-tts-flash"],
         },
         auth_check={"url": f"{DASHSCOPE}/tasks?page_no=1&page_size=1", "auth": "bearer"},
         list_models={
@@ -145,21 +154,23 @@ CATALOG: list[ProviderEntry] = [
         key="kling",
         label="可灵（快手）",
         provider="kling",
-        beginner="快手自家协议，只能连可灵官方地址。鉴权方式和别家不一样：要用 AccessKey + SecretKey 拼成一对填进来。视频效果口碑好。",
-        kinds=["image", "video"],
+        beginner="快手自家协议，只能连可灵官方地址。新版控制台发的是**单个 API Key**（api-key-kling-…），直接当 Bearer 用；旧版的 AccessKey + SecretKey 也仍然支持（写成 AK:SK 一行）。视频效果口碑好，也能做语音合成（/audio/tts，音色用 voice_id 指定）。",
+        kinds=["image", "video", "audio"],
         key_fields=[
             KeyField(
                 env="KLING_KEYS",
-                label="AccessKey : SecretKey",
-                placeholder="AccessKey:SecretKey（中间用英文冒号）",
-                hint="可灵开放平台 → 密钥管理，把 AccessKey 和 SecretKey 用英文冒号连起来填在这里",
+                label="API Key（或旧版 AK:SK）",
+                placeholder="api-key-kling-… 或 AccessKey:SecretKey",
+                hint="可灵开放平台 → API 密钥，复制 api-key-kling-… 直接粘贴；只有旧版控制台才需要把 AccessKey 和 SecretKey 用英文冒号连起来",
             )
         ],
         endpoints={
             "image": f"{KLING}/images/generations",
             "video": f"{KLING}/videos/text2video",
+            # 语音是异步任务：POST /audio/tts 提交，GET /audio/tts/{task_id} 查询
+            "audio": f"{KLING}/audio/tts",
         },
-        suggestions={"image": [], "video": ["kling-v2-master", "kling-v1-6"]},
+        suggestions={"image": [], "video": ["kling-v2-master", "kling-v1-6"], "audio": ["kling-tts"]},
         auth_check={"url": f"{KLING}/videos/text2video?pageNum=1&pageSize=1", "auth": "kling_jwt"},
         # 可灵的鉴权是 JWT（AccessKey:SecretKey 换 token），模型列表端点也没有
         # 验证过。推导出来的 /v1/models 未必存在，与其让用户点了报错，
@@ -177,7 +188,7 @@ CATALOG: list[ProviderEntry] = [
         label="OpenAI 及兼容网关",
         provider="openai",
         beginner="OpenAI 官方，以及任何兼容 /v1/images/generations 的网关（中转站、自建代理等都算）。用中转站就点这张，再把「高级选项」里的接口地址换成网关地址：留空会走 api.openai.com，中转站的 Key 打不通官网。视频走的是 OpenAI 风格异步协议（智谱那套 /videos/generations），地址同样要换成网关的。",
-        kinds=["image", "video"],
+        kinds=["image", "video", "audio"],
         key_fields=[
             KeyField(
                 env="OPENAI_API_KEY",
@@ -195,6 +206,8 @@ CATALOG: list[ProviderEntry] = [
             # 静默回落到同一个地址（adapters._openai_video_target），用户反而
             # 看不见自己实际打到了哪台机器。
             "video": f"{ZHIPU}/videos/generations",
+            # 语音是同步接口，一次 POST 直接回二进制，路径固定
+            "audio": "https://api.openai.com/v1/audio/speech",
         },
         suggestions={"image": ["gpt-image-1", "dall-e-3"]},
         auth_check={
@@ -214,14 +227,18 @@ CATALOG: list[ProviderEntry] = [
         key="siliconflow",
         label="硅基流动 SiliconFlow",
         provider="openai",
-        beginner="国内聚合平台，接口本身就是 OpenAI 协议，点这张会自动预填硅基的官方地址。模型多、价格低，适合试水；用别家的中转站请选「OpenAI 及兼容网关」。",
-        kinds=["image"],
+        beginner="国内聚合平台，接口本身就是 OpenAI 协议，点这张会自动预填硅基的官方地址。模型多、价格低，适合试水；用别家的中转站请选「OpenAI 及兼容网关」。除了出图，还有 CosyVoice / fish-speech 系列可做语音合成。",
+        kinds=["image", "audio"],
         key_fields=[
             KeyField(env="SILICONFLOW_API_KEY", label="API Key", placeholder="sk-...")
         ],
-        endpoints={"image": "https://api.siliconflow.cn/v1/images/generations"},
+        endpoints={
+            "image": "https://api.siliconflow.cn/v1/images/generations",
+            "audio": "https://api.siliconflow.cn/v1/audio/speech",
+        },
         suggestions={
-            "image": ["Kwai-Kolors/Kolors", "black-forest-labs/FLUX.1-schnell"]
+            "image": ["Kwai-Kolors/Kolors", "black-forest-labs/FLUX.1-schnell"],
+            "audio": ["FunAudioLLM/CosyVoice2-0.5B", "fnlp/MOSS-TTSD-v0.5"],
         },
         auth_check={
             "url": "https://api.siliconflow.cn/v1/models",
@@ -272,8 +289,8 @@ CATALOG: list[ProviderEntry] = [
         key="zhipu",
         label="智谱 BigModel（CogView / CogVideoX）",
         provider="openai",
-        beginner="智谱开放平台，走的是 OpenAI 协议、但地址是智谱自己的（点这张会自动预填）。CogView 出图、CogVideoX 出视频，有免费模型可试。",
-        kinds=["image", "video"],
+        beginner="智谱开放平台，走的是 OpenAI 协议、但地址是智谱自己的（点这张会自动预填）。CogView 出图、CogVideoX 出视频，GLM-TTS 做语音合成（/audio/speech，音色用 voice 指定），有免费模型可试。",
+        kinds=["image", "video", "audio"],
         key_fields=[
             KeyField(
                 env="ZHIPU_API_KEY",
@@ -285,10 +302,12 @@ CATALOG: list[ProviderEntry] = [
         endpoints={
             "image": f"{ZHIPU}/images/generations",
             "video": f"{ZHIPU}/videos/generations",
+            "audio": f"{ZHIPU}/audio/speech",
         },
         suggestions={
             "image": ["cogview-3-flash", "cogview-4"],
             "video": ["cogvideox-flash", "cogvideox-3"],
+            "audio": ["glm-tts"],
         },
         # 实测确认（2026-09，用真实密钥只读验证）：
         #   * /api/paas/v4/models 存在，但只返回 10 个 glm-* **文本**模型，

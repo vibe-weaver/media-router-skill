@@ -13,7 +13,7 @@ python3 "<SKILL_DIR>/scripts/media_router.py" web
 
 1. **厂商配置**：点一个内置平台卡片（火山方舟 / 阿里云百炼 / 可灵 / OpenAI 兼容网关 /
    硅基流动 / Replicate / fal / 智谱 / 内置工具 / 自定义接口），粘贴 API Key 保存。
-2. **模型配置**：选厂商 → 填模型名 → 选图像或视频页 →（可选）填生成规格 → 配权重/优先级 → 保存。
+2. **模型配置**：选厂商 → 填模型名 → 选图像 / 视频 / 语音页 →（可选）填生成规格 → 配权重/优先级 → 保存。
    页面上有两个测试：
    - **测试连通性**：只调只读接口验密钥，不生成、不花钱；
    - **真实测试**：真跑一次生成，验证“提交→推理→下载→落盘”，会消耗额度，页面会先确认。
@@ -46,8 +46,8 @@ image:
       api_key_env: ARK_API_KEY     # 密钥从哪个环境变量读
 ```
 
-- 三种 `strategy`：`priority_then_weight`（默认）、`weight_only`、`fallback_chain`。
-  视频贵且要可预测时用 `fallback_chain`。
+- `strategy` 只剩 `priority_then_weight`：先按 `priority` 分档，同档内按 `weight` 加权随机。
+  （`weight_only` / `fallback_chain` 已下线，老配置会被自动纠正并告警。）
 - 密钥放环境变量，或 `secrets.yaml` 的 `keys` 下；**不要**写进 `models.yaml` 的 `api_key` 字段。
 - 接入文档里没有的平台，用 `provider: generic_http` 填 YAML 即可，不用改代码。
   各家参数对照见 `references/providers.md`。
@@ -62,7 +62,7 @@ image:
 |---|---|
 | `config` | 看配置解析结果、路径、可用 provider |
 | `providers` | 看内置支持哪些 provider 及其接入方式 |
-| `list [--kind image\|video]` | 看模型池、优先级、权重、Key 是否就绪、是否被熔断 |
+| `list [--kind image\|video\|audio]` | 看模型池、优先级、权重、Key 是否就绪、是否被熔断 |
 | `resolve --kind ...` | **只看会选谁**，不真调用。排障用，不要每次生成前都跑 |
 | `web [--port 8760] [--no-browser]` | 打开本机网页配置界面 |
 | `generate --kind ... --prompt "..."` | 执行生成 |

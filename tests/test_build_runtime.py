@@ -97,5 +97,16 @@ with tempfile.TemporaryDirectory(prefix="mr-build-test-") as tmp:
         check("快速路径" in zf.read("media-router/SKILL.md").decode("utf-8"),
               "包内 SKILL.md 是精简版")
 
+    # 密钥防线有两条：git 侧靠 .gitignore，打包侧靠 SECRET_PATTERNS。
+    # 前者以前只存在于文档承诺里（八处注释都写"已在 .gitignore 里"，仓库里却没有这个文件），
+    # 真被删掉也没人会发现 —— 所以在这里钉死。
+    root_ignore = ROOT / ".gitignore"
+    check(root_ignore.is_file(), "仓库根有 .gitignore")
+    ignore_text = root_ignore.read_text(encoding="utf-8") if root_ignore.is_file() else ""
+    check("config/secrets.web.yaml" in ignore_text and "config/secrets.yaml" in ignore_text,
+          ".gitignore 覆盖了明文密钥文件")
+    check("config/models.web.yaml" in ignore_text, ".gitignore 覆盖了页面写出的本机配置")
+    check("media-router/.gitignore" in names, "zip 里带 .gitignore（装完也能防误提交）")
+
 print(f"\n通过 {passed} 项，失败 {failed} 项")
 sys.exit(1 if failed else 0)

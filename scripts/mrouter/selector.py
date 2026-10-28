@@ -1,15 +1,13 @@
-"""候选模型排序 —— 权重与优先级的具体算法。
+"""候选模型排序 —— 权重与优先级的唯一一套算法。
 
-三种策略：
-  priority_then_weight（默认）
-      先按 priority 分档，只在最小 priority 那一档里做加权随机。行为可控：
-      priority=1 的模型永远压过 priority=2，但同档多个模型按 weight 分摊流量。
-  weight_only
-      忽略 priority，全部按 weight 加权随机。适合"就是想让多个模型分流"。
-  fallback_chain
-      严格按 (priority, -weight) 排序，不做随机。适合视频这类贵且要可预测的场景。
+规则只有一条（priority_then_weight）：
+  先按 priority 分档，只在最小 priority 那一档里做加权随机。
+  priority=1 的模型永远压过 priority=2；同档多个模型按 weight 分摊流量。
 
 排序结果同时被用作「失败后的降级序列」：第 1 个失败就试第 2 个，以此类推。
+（早期还有 weight_only / fallback_chain 两种策略，已下线：
+  前者忽略优先级，等于让备用模型跟主用模型抢流量，和 priority 的语义打架；
+  后者不随机，和"同档按权重分流"是两套心智模型。留一套就够，页面也只讲这一套。）
 """
 
 from __future__ import annotations
@@ -43,7 +41,6 @@ def weighted_shuffle(models: Iterable[ModelSpec]) -> list[ModelSpec]:
 
 def rank_candidates(
     models: list[ModelSpec],
-    strategy: str,
     requires: list[str],
     health: Any,
     now: float | None = None,
@@ -65,28 +62,38 @@ def rank_candidates(
         capable = enabled
         notes["capability_relaxed"] = True
 
-    healthy = [m for m in capable if not health.is_cooling(m.id, now)]
-    notes["excluded_cooling"] = [
-        m.id for m in capable if health.is_cooling(m.id, now)
-    ]
+    cooling = [m for m in capable if health.is_cooling(m.id, now)]
+    cooling_ids = {m.id for m in cooling}
+    healthy = [m for m in capable if m.id not in cooling_ids]
+    relaxed = False
     if not healthy:
-        # 全部在冷却中：与其失败，不如放开熔断并挑最早恢复的那个
-        healthy = sorted(capable, key=lambda m: health.cooling_remaining(m.id, now))
+        # 全部在冷却中：与其失败，不如放开熔断、**按最早恢复的先后**去试。
+        # 这里刻意不再按 priority 分档：档位只决定"平时谁先上"，
+        # 而全部被熔断时，用户要的是"最快能出结果的那个"，
+        # 否则 A 还要等 4 分钟、B 5 秒后就恢复，却会先去撞 A。
+        healthy = sorted(
+            capable,
+            key=lambda m: (health.cooling_remaining(m.id, now), m.priority),
+        )
+        relaxed = True
         notes["health_relaxed"] = True
-
-    pool = healthy
-
-    if strategy == "fallback_chain":
-        ordered = sorted(pool, key=lambda m: (m.priority, -m.weight, m.id))
-    elif strategy == "weight_only":
-        ordered = weighted_shuffle(pool)
+        # 这些模型接下来都会被尝试，不该再列进"被排除"里
+        notes["excluded_cooling"] = []
     else:
-        ordered = []
-        for priority in sorted({m.priority for m in pool}):
-            tier = [m for m in pool if m.priority == priority]
+        notes["excluded_cooling"] = [m.id for m in cooling]
+
+    ordered: list[ModelSpec] = []
+    if relaxed:
+        ordered.extend(healthy)
+    else:
+        # 先分档，再在档内做加权随机：分档保证"优先级 1 永远压过 2"，
+        # 档内随机保证同优先级的多个模型能按 weight 分摊流量。
+        for priority in sorted({m.priority for m in healthy}):
+            tier = [m for m in healthy if m.priority == priority]
             ordered.extend(weighted_shuffle(tier))
 
-    notes["strategy"] = strategy
+    # 输出里保留 strategy 字段（值恒定），CLI/自检按老结构读取不受影响
+    notes["strategy"] = "priority_then_weight"
     notes["requires"] = list(requires)
     notes["candidate_count"] = len(ordered)
     return ordered, notes

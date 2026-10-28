@@ -17,6 +17,7 @@ import json
 import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -260,21 +261,24 @@ def check_page_js(page: Any) -> None:
         ('data-act="del-model"', "模型删除按钮"),
         ('data-act="toggle-model"', "模型启停开关"),
         ('data-act="edit-model"', "模型编辑按钮"),
+        ('data-act="test-model"', "模型连通性测试（卡片）"),
+        ('data-act="real-test-model"', "模型真实测试（卡片）"),
         ('data-act="edit-vendor"', "厂商编辑按钮"),
         ("/api/vendor/test", "厂商连通性测试"),
         ("/api/model/test", "模型连通性测试"),
-        ('id="btn-real-test-model"', "模型真实测试按钮"),
+
         ("function uiConfirm(", "删除模型的确认弹窗"),
         ("modal-mask", "弹窗遮罩层"),
         # 这三条是"点了没反应"的防线，缺一个就可能又变成静默失效
         ("function guarded(", "点击处理的异常兜底"),
         ("function networkDown(", "后台断开时的提示"),
-        ("scrollIntoView", "表单自动滚入视野"),
+        ('el("model-form").scrollIntoView', "打开模型表单后滚入视野"),
+        ('el("vendor-form").scrollIntoView', "打开厂商表单后滚入视野"),
         # 自定义接口必须能在界面上配 options，否则选中它等于死路
         ('id="vf-options"', "接口参数输入框"),
         ("function collectOptions()", "接口参数校验"),
     ]:
-        check(f"页面里还有{why}", snippet in str(page), f"找不到 {snippet!r}")
+        check(f"{why}：仍在页面上", snippet in str(page), f"找不到 {snippet!r}")
 
     # 反面检查：拉取模型功能已按要求整体移除（页面只剩手动添加）
     for snippet, why in [
@@ -310,14 +314,14 @@ def check_page_js(page: Any) -> None:
         "切换图像/视频页会静默丢弃表单",
     )
     check(
-        "路由摘要显示当前策略",
-        'id="strategy-select"' in str(page),
-        "页面看不到当前是 priority_then_weight / weight_only / fallback_chain",
+        "路由条说明当前策略",
+        'class="strategy-badge"' in str(page) and "按优先级" in str(page),
+        "页面看不到当前用的哪种路由策略",
     )
     check(
-        "策略下拉带动态解释",
-        'id="strategy-hint"' in str(page),
-        "用户切换策略时看不到三种策略的完整区别",
+        "已下线的两种策略不再出现在页面上",
+        "weight_only" not in str(page) and "fallback_chain" not in str(page),
+        "页面里还留着「全局权重 / 严格顺位」",
     )
     check(
         "页面有刷新按钮",
@@ -848,8 +852,9 @@ def check_store_regressions_round2() -> None:
         str(gone.data.get("vendors")),
     )
 
-    # A10：_ensure_pool 原来用整块 `node = {...}` 覆盖，把用户选的 strategy 冲掉。
-    # 用户改成 weight_only，存一次模型就变回 priority_then_weight。
+    # A10：_ensure_pool 原来用整块 `node = {...}` 覆盖，会把池子里的 strategy 冲掉。
+    # 这里故意用一个**非默认值**当哨兵：store 层只负责保留这个键
+    # （合法性校验在 load_config 里做），存一次模型不能把它改写掉。
     keep = fresh(image={"strategy": "weight_only", "models": []})
     keep.upsert_model({"id": "", "kind": "image", "model": "x", "vendor": "v-base"})
     check(
@@ -922,6 +927,25 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
         isinstance(page, str) and webserver.TOKEN_PLACEHOLDER not in page,
         "页面里还留着 __MR_TOKEN__",
     )
+    # 页面按文件 mtime 热更新：服务不用重启，改完 assets/config.html 刷新就能看到
+    _tmp_dir = Path(tempfile.mkdtemp(prefix="mr-page-"))
+    _tmp_page = _tmp_dir / "page.html"
+    _tmp_page.write_text("<html><body>page-v1 __MR_TOKEN__</body></html>", encoding="utf-8")
+    _orig_page = webserver.PAGE_FILE
+    try:
+        webserver.PAGE_FILE = _tmp_page
+        _v1 = server._render_page()
+        _tmp_page.write_text("<html><body>page-v2 __MR_TOKEN__</body></html>", encoding="utf-8")
+        os.utime(_tmp_page, (time.time() + 5, time.time() + 5))
+        _v2 = server._render_page()
+    finally:
+        webserver.PAGE_FILE = _orig_page
+    check(
+        "改动页面文件后无需重启服务即可生效",
+        "page-v1" in _v1 and "page-v2" in _v2,
+        f"{_v1[:40]!r} -> {_v2[:40]!r}",
+    )
+
     check(
         "页面里带上了真实 token",
         isinstance(page, str) and server.token in page,
@@ -1144,26 +1168,12 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
     # ---------------------------------------------------------- 模型
     section("模型配置")
 
-    # 基础层有模型、叠加层还没有任何模型时，改策略不能把 strategy 节点 prune 掉
-    status, res = client.call(
-        "POST", "/api/strategy", {"kind": "video", "strategy": "weight_only"}
-    )
-    check("base-only 池改策略成功", status == 200 and res.get("ok"), str(res))
-    status, payload = client.call("GET", "/api/bootstrap")
-    check(
-        "base-only 池策略已生效",
-        payload.get("strategies", {}).get("video") == "weight_only",
-        str(payload.get("strategies")),
-    )
-    client.call(
-        "POST", "/api/strategy", {"kind": "video", "strategy": "priority_then_weight"}
-    )
-
     status, res = client.call(
         "POST",
         "/api/model",
         {"id": "", "vendor": ark_id, "model": "doubao-seedream-3-0-t2i-250415", "label": "",
-         "kind": "image", "priority": 1, "weight": 50, "enabled": True, "supports": ["text2img"]},
+         "kind": "image", "priority": 1, "weight": 50, "enabled": True, "supports": ["text2img"],
+         "input_modalities": ["image", "text"], "output_modalities": ["image"]},
     )
     check("添加图像模型成功", status == 200 and res.get("ok"), str(res))
     image_id = res.get("id") if isinstance(res, dict) else None
@@ -1179,6 +1189,19 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
     check("添加视频模型成功", status == 200 and res.get("ok"), str(res))
     video_id = res.get("id") if isinstance(res, dict) else None
 
+    # 语音（audio）类目：第三个页签对应的池子，走同一条写入通道
+    status, res = client.call(
+        "POST",
+        "/api/model",
+        {"id": "", "vendor": ark_id, "model": "doubao-tts", "label": "语音合成",
+         "kind": "audio", "priority": 1, "weight": 40, "enabled": True,
+         "supports": ["text2audio"], "input_modalities": ["text"],
+         "output_modalities": ["audio"],
+         "params": {"voice": "Cherry", "speed": 1.1, "format": "mp3"}},
+    )
+    check("添加语音模型成功", status == 200 and res.get("ok"), str(res))
+    audio_id = res.get("id") if isinstance(res, dict) else None
+
     status, payload = client.call("GET", "/api/bootstrap")
     image_ids = [m["id"] for m in payload["models"].get("image", [])]
     video_ids = [m["id"] for m in payload["models"].get("video", [])]
@@ -1186,6 +1209,47 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
     check("bootstrap 里视频池有该模型", video_id in video_ids, str(video_ids))
     video_model = next((m for m in payload["models"].get("video", []) if m["id"] == video_id), {})
     check("视频模型带上了图生视频能力", "img2video" in video_model.get("supports", []), str(video_model))
+
+    # 输入/输出模态（功能标签）：页面提交什么就存什么，没提交就按类目推默认值
+    image_model = next((m for m in payload["models"].get("image", []) if m["id"] == image_id), {})
+    check(
+        "图像模型保存了输入模态，并按固定顺序返回",
+        image_model.get("input_modalities") == ["text", "image"],
+        str(image_model.get("input_modalities")),
+    )
+    check(
+        "图像模型保存了输出模态",
+        image_model.get("output_modalities") == ["image"],
+        str(image_model.get("output_modalities")),
+    )
+    check(
+        "没提交模态的视频模型按类目 + supports 推默认值",
+        video_model.get("input_modalities") == ["text", "image"]
+        and video_model.get("output_modalities") == ["video"],
+        f"{video_model.get('input_modalities')} / {video_model.get('output_modalities')}",
+    )
+
+    check(
+        "bootstrap 里语音池有这个模型",
+        audio_id in [m["id"] for m in payload["models"].get("audio", [])],
+        str([m["id"] for m in payload["models"].get("audio", [])]),
+    )
+    check(
+        "bootstrap 的 kinds 含 audio，且顺序是 图像→视频→语音",
+        payload.get("kinds") == ["image", "video", "audio"],
+        str(payload.get("kinds")),
+    )
+    audio_model = next(
+        (m for m in payload["models"].get("audio", []) if m["id"] == audio_id), {}
+    )
+    check(
+        "语音模型的模态与生成规格都存下来了",
+        audio_model.get("input_modalities") == ["text"]
+        and audio_model.get("output_modalities") == ["audio"]
+        and audio_model.get("params", {}).get("voice") == "Cherry"
+        and audio_model.get("params", {}).get("speed") == 1.1,
+        str(audio_model),
+    )
     check("模型带上了厂商中文名", video_model.get("vendor_label") == "火山方舟（即梦 / Seedance）", str(video_model.get("vendor_label")))
     check("模型带上了权重与优先级", video_model.get("weight") == 70 and video_model.get("priority") == 1, str(video_model))
     check(
@@ -1199,23 +1263,14 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
         str(video_model),
     )
 
-    # 策略修改：页面下拉 -> /api/strategy -> 叠加层
+    # 策略只剩 priority_then_weight：改策略的接口已下线，请求应当打不到
     status, res = client.call(
         "POST", "/api/strategy", {"kind": "image", "strategy": "weight_only"}
     )
-    check("修改图像策略成功", status == 200 and res.get("ok"), str(res))
-    status, payload = client.call("GET", "/api/bootstrap")
     check(
-        "bootstrap 里图像策略已更新",
-        payload.get("strategies", {}).get("image") == "weight_only",
-        str(payload.get("strategies")),
-    )
-    status, res = client.call(
-        "POST", "/api/strategy", {"kind": "image", "strategy": "bogus"}
-    )
-    check("非法策略被拒绝", status == 400, str(res))
-    client.call(
-        "POST", "/api/strategy", {"kind": "image", "strategy": "priority_then_weight"}
+        "策略修改接口已下线",
+        status in (404, 405),
+        f"status={status} {res}",
     )
 
     status, res = client.call(
@@ -1232,7 +1287,8 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
     status, res = client.call("POST", "/api/model", {"id": "", "vendor": ark_id, "model": "", "kind": "image"})
     check("空模型名被拒", status == 400, f"status={status} {res}")
 
-    status, res = client.call("POST", "/api/model", {"id": "", "vendor": ark_id, "model": "x", "kind": "audio"})
+    # audio 现在是合法类目（页面第三个页签），非法值改用 music
+    status, res = client.call("POST", "/api/model", {"id": "", "vendor": ark_id, "model": "x", "kind": "music"})
     check("非法类目被拒", status == 400, f"status={status} {res}")
 
     # 编辑：改权重与优先级
@@ -1267,6 +1323,15 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
     check("编辑不会顺手把停用的模型开回来", video_model.get("enabled") is False, str(video_model))
 
     # 连通性测试（轻量）
+    # 语音也走同一套预检：目录里已经有了 endpoints.audio，密钥和可达性都验得了。
+    # （早先这里断言「语音被明确拒绝」，那是语音还没接通时的临时守卫，已撤掉。）
+    status, res = client.call("POST", "/api/model/test", {"id": audio_id, "deep": False}, timeout=30)
+    check(
+        "语音模型的连通性测试不再被拒（返回检查项）",
+        status == 200 and "checks" in res,
+        f"status={status} {str(res)[:200]}",
+    )
+
     status, res = client.call("POST", "/api/model/test", {"id": image_id, "deep": False})
     check("轻量测试返回检查项", status == 200 and "checks" in res and "summary" in res, str(res)[:300])
     if status == 200:
@@ -1317,6 +1382,23 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
             " 401 " in bad_preview_raw.split("\r\n")[0],
             bad_preview_raw.split("\r\n")[0],
         )
+
+        # 语音产物要能在页面上试听：Content-Type 必须是 audio/*，
+        # 落成 application/octet-stream 时 <audio> 往往直接拒播。
+        wav_sample = outputs / "_selftest_preview.wav"
+        wav_sample.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt " + b"\x00" * 32)
+        try:
+            wav_raw = _raw_get(
+                "/api/file?path=" + urllib.parse.quote(str(wav_sample)),
+                f"Cookie: {webserver.COOKIE_NAME}={server.token}\r\n",
+            ).lower()
+            check(
+                "wav 产物按 audio/wav 下发（<audio> 能播）",
+                "content-type: audio/wav" in wav_raw,
+                wav_raw.split("\r\n")[1] if "\r\n" in wav_raw else wav_raw[:80],
+            )
+        finally:
+            wav_sample.unlink(missing_ok=True)
     finally:
         sample.unlink(missing_ok=True)
 
@@ -1729,7 +1811,7 @@ def run_checks(client: Client, server: webserver.ConfigServer) -> None:
     directory = catalog.as_dict()
     check(
         "每个平台的类目声明合法",
-        all(e["kinds"] and set(e["kinds"]) <= {"image", "video"} for e in directory),
+        all(e["kinds"] and set(e["kinds"]) <= {"image", "video", "audio"} for e in directory),
         "有平台类目写错了",
     )
     check(

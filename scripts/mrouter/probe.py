@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import catalog
+from . import catalog, config
 from .adapters import GenRequest, Ctx, kling_jwt, run_adapter
 from .config import ModelSpec, RouterConfig, Vendor
 from .transport import HttpError, request
@@ -825,7 +825,7 @@ def fetch_models(
         # 必须把真实原因摆出来，否则用户会以为是程序坏了。
         note = str(spec.get("media_missing") or "")
         if not note:
-            where = "图像" if kind == "image" else "视频"
+            where = config.KIND_LABELS.get(kind, kind)
             note = (
                 f"接口返回了 {total} 个模型，但没有一个是{where}生成模型"
                 f"（该平台可能只提供文本/语音模型）。"

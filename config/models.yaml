@@ -12,12 +12,22 @@
 #   weight    同一 priority 档位内的权重，决定"被抽中的概率"。
 #             权重 50 和 30 在同一档里，就是 50/80 与 30/80 的出手比例。
 #   supports  能力标签，路由时按需过滤。
-#             图片: text2img / img2img     视频: text2video / img2video
+#             图片: text2img / img2img
+#             视频: text2video / img2video
+#             语音: text2audio / audio2audio
+#   input_modalities / output_modalities
+#             功能标签：这个模型能接受什么、能产出什么（text/image/video/audio）。
+#             只用于标注功能、让 agent 挑模型时看得清，不参与路由过滤。
+#             图片模型可选 text/image，视频模型四种都行，语音模型是 text/audio；
+#             不写就按类目推默认值。
+#             在配置页面添加模型时，勾「输入模态 / 输出模态」就是在填这两个字段。
 #
-# strategy 三种取值：
-#   priority_then_weight  先分档，同档内按 weight 加权随机（默认，推荐）
-#   weight_only           忽略 priority，全部按 weight 加权随机
-#   fallback_chain        严格按 (priority, weight) 排序，不随机（适合贵的视频）
+# 类目（页面上就是三个页签）：image 图像 / video 视频 / audio 语音。
+# 三个类目是写死的：页面、写入校验、CLI 的 --kind 都按这三个来。
+#
+# strategy 只剩一种：priority_then_weight —— 先按 priority 分档，
+# 只在最小那一档里按 weight 加权随机，更高档（数字更大）全部是备用。
+# （weight_only / fallback_chain 已下线；老配置里写着它们会告警并按这套处理。）
 #
 # ⚠️ YAML 的引号规则（踩过坑，一定要看）：
 #   下面这几类值**必须加引号**，否则读出来的东西不是你想的那个：
@@ -44,6 +54,7 @@ defaults:
   # 单次 generate 最多尝试几个候选模型（失败后自动换下一个）
   max_attempts: 2
   # 产物落盘目录。null = ./outputs（运行命令时的当前工作目录）
+  # 实际写入 <该目录>/image 或 <该目录>/video（按类目分子目录）
   output_dir: null
   # 熔断状态目录。null = <skill>/state
   state_dir: null
@@ -73,6 +84,7 @@ image:
   strategy: priority_then_weight
   models:
     # 内置工具兜底：不调任何接口，把请求交回给 AI 助手，让它用自己的 ImageGen 完成。
+    # 它没有「输入/输出模态」—— 真正干活的是 agent 的工具，标了反而像真模型。
     # priority 给一个很大的数（1000000），保证它永远排在真模型后面；没配 Key 时靠它兜底，
     # 任务不会直接失败（返回 status: delegate，退出码 3）。自己加的模型会自动排在它前面。
     # 配置页面把它标为「内置」，不允许编辑/删除，只能隐藏。
@@ -93,6 +105,8 @@ image:
 #       weight: 50
 #       enabled: true
 #       supports: [text2img]          # 需要图生图再加 img2img
+#       input_modalities: [text]      # 功能标签：能接受「文本」
+#       output_modalities: [image]    # 功能标签：能产出「图片」
 #       api_key_env: ZHIPU_API_KEY    # 密钥从哪个环境变量/密钥文件读
 #       # endpoint: https://…         # 可选，非默认网关才需要
 #       # params:
@@ -122,7 +136,63 @@ video:
 #       weight: 60
 #       enabled: true
 #       supports: [text2video, img2video]
+#       input_modalities: [text, image]   # 能接受「文本」「图片」
+#       output_modalities: [video]        # 能产出「视频」（也可加 audio/text/image）
 #       api_key_env: ARK_API_KEY
 #       params:
 #         ratio: "16:9"               # ⚠️ 比值必须加引号（见顶部说明）
 #         duration: 5
+
+# ---------------------------------------------------------------------------
+# 语音模型池（语音合成 TTS）—— 默认空池，往 models: 下面加条目即可。
+# 页面「模型配置 → 语音模型」页签对应的就是这一节。
+#
+# 已支持的生成通路：
+#   provider: dashscope —— 同步。qwen-audio-*-tts-* / cosyvoice-*
+#                           端点 /services/audio/tts/SpeechSynthesizer，入参用 text_prompt
+#                          qwen3-tts-*
+#                           端点 /services/aigc/multimodal-generation/generation，入参用 text
+#   provider: openai    —— 同步。/v1/audio/speech，直接回音频二进制
+#                          智谱 BigModel（glm-tts）和硅基流动（CosyVoice2-0.5B 等）
+#                          都是这套协议，填对应厂商的地址即可。默认音色/格式按域名取：
+#                          智谱 tongtong + wav（它只收 wav/pcm，mp3 会 400），
+#                          硅基 <模型名>:alex + mp3，其余 alloy + mp3。
+#                          显式写 params.voice / params.response_format 永远优先。
+#   provider: kling     —— **异步**。/audio/tts 提交，轮询 /audio/tts/{task_id}；
+#                          请求体没有 model_name，音色用 params.voice_id 指定（**必填**，
+#                          如 chuanmeizi_speech02），voice_language 不填默认 zh。
+#                          鉴权：新版控制台的单个 API Key（api-key-kling-…）直接当 Bearer；
+#                          旧版 AccessKey:SecretKey 也支持。语音和视频共用同一把 Key。
+#   provider: volcengine —— 同步流式。**注意域名不同**：语音在豆包语音
+#                          (openspeech.bytedance.com/api/v3/tts/unidirectional)，
+#                          不在方舟下面；鉴权是新版 X-Api-Key（或旧版 appid:token）
+#                          + X-Api-Resource-Id（默认 seed-tts-2.0）；
+#                          音色用 params.speaker 指定（**必填**），返回是 base64 音频片段流。
+#                          语音的 Key 与方舟的 ARK_API_KEY 不通用，建议单独加一个厂商条目。
+# 其余平台（replicate、fal）的 TTS 协议各不相同，暂未接入；
+# 配了会明确报「该类目还没有接入适配器」，不会静默拿图像接口去打。
+#
+# voice / format / sample_rate 都可以不填（平台有默认值），要固定音色就写进 params。
+# 注意：qwen-audio 系列调语速/情感用的是 instruction（自然语言指令），不是 speed ——
+# 实测传 speed=1.2 仍返回 200，但时长没变，多半是被平台忽略了。
+# ---------------------------------------------------------------------------
+audio:
+  strategy: priority_then_weight
+  models: []
+# 示例：
+# audio:
+#   strategy: priority_then_weight
+#   models:
+#     - id: my-tts
+#       provider: openai              # 或 generic_http 接任意 REST 接口
+#       model: tts-1                  # 平台侧的模型名
+#       priority: 1
+#       weight: 50
+#       enabled: true
+#       supports: [text2audio]        # 语音克隆再加 audio2audio
+#       input_modalities: [text]      # TTS：文本进
+#       output_modalities: [audio]    # 音频出（ASR 模型反过来写 text）
+#       api_key_env: OPENAI_API_KEY
+#       params:
+#         voice: alloy                # 音色
+#         speed: 1.0                  # 语速

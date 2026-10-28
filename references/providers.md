@@ -65,7 +65,8 @@
 | `options.task_base` | 只有视频用。查询地址默认从 `endpoint` 里切掉 `/videos/generations` 推出来；配了中转/网关又推不出来时，在这里显式写查询地址前缀 |
 
 命令行 `--duration` / `--size` / `--param key=value` 对视频都生效，
-优先级是 `--param` > 专用旗标 > `params`。
+优先级是 `--param` > 专用旗标 > `params`。`--param` 里适配器没显式处理的键也会
+原样写进请求体（火山 Seedance 是按 `--key value` 拼进提示词），stderr 日志会列出透了哪些字段。
 
 ```yaml
 # OpenAI 官方
@@ -386,6 +387,9 @@ kind 不匹配时宁可不发，并留一行日志说明（不是静默忽略）
 `{{duration}}`、`{{count}}`、`{{image}}`、`{{image_url}}`、`{{image1}}`~`{{image3}}`、`{{task_id}}`（仅 poll 段）
 
 如果某个值是纯占位符（如 `size: "{{duration}}"`），会保留原始类型（数字/布尔）而不是转成字符串。
+
+命令行 `--param key=value` 也会合并进提交请求体：模板里已经写了的键会被覆盖，
+**模板里没有的键会直接加上**（模板不必为了一个新字段先改一遍）。
 
 ### 完整示例
 

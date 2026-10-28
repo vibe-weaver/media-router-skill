@@ -1,62 +1,62 @@
-# 密钥：绝对不要提交（任何名字带 secrets 的文件一律排除，宁可误伤）
+# ============================================================================
+# media-router 忽略规则
+#
+# 这个文件是「承诺」的兑现：config/secrets.example.yaml、models.web.example.yaml、
+# README、references/setup.md 里都写着「已在 .gitignore 里」，但仓库里一直没有它。
+# 少了这个文件，你在项目目录里 git init 之后，第一发 commit 就会把明文 API Key
+# 一起推上去 —— 而且 .gitignore 对**已经入库**的文件无效，改起来要重写历史。
+#
+# 打包脚本 tools/build_pack.py 里另有一套独立的密钥白名单（SECRET_PATTERNS），
+# 两处都要守：这里管 git，那里管 zip。
+# ============================================================================
+
+# ---- 密钥（明文，绝对不能入库）----
 config/secrets.yaml
-config/secrets.yml
-config/secrets.json
 config/secrets.web.yaml
-config/secrets.web.yml
-config/secrets.web.json
-config/secrets*.local-backup*
-
-# 本地个人配置备份（开源清理时手工留的）
-config/*.local-backup*
-
-# 环境变量文件：密钥最常见的载体，一条也别放过
+# 手写层/页面层可能被编辑器留下的备份，同样含明文
+config/*.local-backup
+config/*.bak
+config/*.orig
+config/*.rej
+config/secrets*.yml
+*.pem
+*.key
+*.p12
+*.pfx
 .env
 .env.*
 
-# 手工备份 / 证书 / 私钥 / patch 残渣
-# 审计确认过仓库里目前没有这类文件，加在这里是防手滑：
-# 配置页面或手工调试留下的 models.web.yaml.bak-YYYYmmdd-HHMMSS 也在这条覆盖范围内。
-*.bak
-*.bak-*
-*.orig
-*.rej
-*.key
-*.pem
-*.p12
-*.pfx
-
-# 配置页面生成的厂商/模型清单：含你自己的厂商名、私有网关地址、启用了哪些模型，
-# 属于个人配置，不入库。仓库里改由 config/models.web.example.yaml（纯示例）代替。
+# ---- 配置页写出的本机状态（不含密钥，但属于机器本地，不该共享）----
 config/models.web.yaml
 config/models.web.yml
-config/models.web.json
 
-# 运行时状态与产物
-state/
+# ---- 运行时产物与状态 ----
+# outputs/ 里是真生成的图片/视频/音频，几十 MB，且可能含提示词
 outputs/
-
-# pack 打包产物（tools/build_pack.py 生成，只用于上传 Release 资产）
+# state/ 里是熔断计数和失败记录（含厂商返回的报错原文）
+state/
 dist/
 
-# Agent 工具数据：WorkBuddy 的项目记忆/笔记本，含内部排查笔记与本地环境描述，
-# 属于本机工具状态而不是这个 skill 的交付内容，不入库。
-.workbuddy/
-
-# Python
+# ---- Python ----
 __pycache__/
 *.py[cod]
 *.egg-info/
-# 虚拟环境：本项目零依赖，其实不需要 venv；真要建也别提交（几十 MB 且含绝对路径）
 .venv/
 venv/
-env/
-ENV/
-virtualenv/
-pyvenv.cfg
 
-# 编辑器与系统
-.vscode/
+# ---- 编辑器 / 系统 ----
 .idea/
+.vscode/
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# ---- 临时文件 / 日志 ----
+*.log
+*.err
+*.tmp
+~$*
+
+# ---- agent 开发记忆（含本机路径与调试细节，不入库）----
+.workbuddy/
+

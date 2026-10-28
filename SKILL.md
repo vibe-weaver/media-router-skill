@@ -1,10 +1,11 @@
 ---
 name: media-router
-version: 1.2.0
+version: 1.3.0
 description: >-
-  当任务卡在生成图片/视频步骤时，用用户配置的多模型池完成生成并回传产物；
+  当任务卡在生成图片/视频/语音步骤时，用用户配置的多模型池完成生成并回传产物；
   支持优先级/权重分流、失败降级与熔断。触发词：生成图片、文生图、图生图、改图、
-  生成视频、文生视频、图生视频、首尾帧、多模型池、模型权重、模型优先级、失败降级、media router。
+  生成视频、文生视频、图生视频、首尾帧、语音合成、文字转语音、配音、TTS、
+  多模型池、模型权重、模型优先级、失败降级、media router。
 agent_created: true
 ---
 
@@ -35,9 +36,20 @@ python3 "<SKILL_DIR>/scripts/media_router.py" generate --kind video --prompt "�
   日志在 stderr，不要解析。
 - 图生图/图生视频：加 `--image <绝对路径或 URL>`。
 - 常用参数：`--size`、`--negative-prompt`、`--count`、`--output-dir`、`--max-attempts`、
-  `--param key=value`。
+  `--param key=value`。`--param` 是「点名发给接口的字段」：适配器认识的键优先，
+  其余键也会原样透传（火山视频按 `--key value` 拼进提示词），日志里会写出透了哪些。
+- `--kind` 支持 `image` / `video` / `audio`。语音的通路：`dashscope`
+  （qwen-audio-*-tts-*、qwen3-tts-*）、`openai`（`/v1/audio/speech`）、
+  `kling`（`/audio/tts`，异步任务，`params.voice_id` 必填，语言默认 zh）、
+  `volcengine`（豆包语音 v3 单向流式，`params.speaker` 必填，要带 `X-Api-Resource-Id`）。
+  智谱（`glm-tts`）和硅基流动（`CosyVoice2-0.5B` 等）走的就是 `openai` 这条，
+  默认音色/格式按域名自动取（智谱 tongtong + wav，它**只收** wav/pcm；硅基 `<模型>:alex` + mp3），
+  要换就写 `--param voice=xxx` / `--param response_format=wav`。
+  配置里若挂了别的平台的 TTS（replicate、fal 等协议各不相同），会明确报
+  「该类目还没有接入适配器」，别当成密钥问题反复重试。
 - `--model <id>` 只能填 `list` 里已有的 id；没配过的 id 会被拒绝。
-- 产物默认落盘到当前目录 `./outputs/`；stdout 的 `files[].path` 是绝对路径。
+- 产物默认落盘到当前目录的 `./outputs/image/`、`./outputs/video/`（按类目分子目录）；
+  stdout 的 `files[].path` 是绝对路径。
 - 视频可能要 1–3 分钟；脚本内部已轮询，**不要**在外面套 sleep 重试。
 - 忘了命令：直接运行脚本（不带子命令）会列出全部子命令和示例。
 
@@ -75,6 +87,10 @@ python3 "<SKILL_DIR>/scripts/media_router.py" generate --kind video --prompt "�
 - 用户不会配：让他运行 `python3 "<SKILL_DIR>/scripts/media_router.py" web`，
   细节见 `references/setup.md`。
 - 想看模型池 / 会选谁：`list` / `resolve`（排障用，不要每次生成前都跑）。
+  每个模型都带 `input_modalities` / `output_modalities`（以及对应的
+  `*_modalities_text` 中文标签），用它判断这个模型吃不吃图、出图还是出视频，
+  不要靠模型名猜。内置兜底（`provider: native`）没有这两个字段 —— 它不调接口，
+  看到 `provider: native` 就直接走 delegate。
 - 要接新平台：`references/providers.md` 和 `references/setup.md`。
 - **改配置是用户的事**：不要擅自改 `config/models.yaml`、权重或优先级。
 

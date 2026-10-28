@@ -32,7 +32,9 @@ PACK_MANIFEST = ROOT / "pack" / "manifest.json"
 DIST_DIR = ROOT / "dist"
 
 # 放进 skills/<id>/ 的内容（白名单；没列进来的一律不进包）
-SKILL_FILES = ["SKILL.md"]
+# .gitignore 也要进包：config/secrets.example.yaml 里写着「已在 .gitignore 里」，
+# 装完技能后用户如果把这个目录纳进自己的 git，得有一份忽略规则兜着。
+SKILL_FILES = ["SKILL.md", ".gitignore"]
 SKILL_DIRS = ["scripts", "config", "references", "assets"]
 
 # 遍历时整个跳过的目录名

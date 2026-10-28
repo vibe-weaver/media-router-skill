@@ -58,6 +58,13 @@ CONTENT_TYPES = {
     ".gif": "image/gif",
     ".mp4": "video/mp4",
     ".webm": "video/webm",
+    # 语音产物也要能在页面上直接试听：缺了这几项，wav/mp3 会以
+    # application/octet-stream 下发，<audio> 往往直接拒播。
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
 }
 
 
@@ -78,6 +85,30 @@ def _within(child: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def preview_roots() -> list[Path]:
+    """产物预览接口允许读取的根目录。
+
+    三个来源：默认产物目录（cwd 或 MEDIA_ROUTER_OUTPUT_DIR）、
+    skill 自带的 outputs（兼容早期版本），以及配置里显式写的
+    ``defaults.output_dir`` —— 「真实测试」的产物就落在最后一个里，
+    少列它会出现"生成成功、预览 403"。
+    """
+    roots = [config.DEFAULT_OUTPUT_DIR, config.SKILL_DIR / "outputs"]
+    try:
+        roots.append(config.load_config().output_dir)
+    except Exception:  # noqa: BLE001 - 配置坏了不该连累其它目录的预览
+        pass
+    unique: list[Path] = []
+    for root in roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            continue
+        if resolved not in unique:
+            unique.append(resolved)
+    return unique
 
 
 def _is_loopback(host: str) -> bool:
@@ -221,8 +252,11 @@ class ConfigApi:
             raise ApiError(store.readonly_reason(), 409)
         vendor_id = str(body.get("vendor") or "").strip()
         kind = str(body.get("kind") or "").strip()
-        if kind not in ("image", "video"):
-            raise ApiError("类目只能是 image（图像）或 video（视频）")
+        if kind not in config.MODEL_KINDS:
+            names = "、".join(
+                f"{k}（{config.KIND_LABELS.get(k, k)}）" for k in config.MODEL_KINDS
+            )
+            raise ApiError(f"类目只能是 {names}")
         names_raw = body.get("models")
         if isinstance(names_raw, str):
             names_raw = [names_raw]
@@ -240,9 +274,15 @@ class ConfigApi:
         except (TypeError, ValueError):
             priority = 1
         extra = bool(body.get("extra"))
-        supports = ["text2img" if kind == "image" else "text2video"]
-        if extra:
-            supports.append("img2img" if kind == "image" else "img2video")
+        # 默认能力必须跟类目对齐：语音的默认能力是 text2audio，
+        # 写成 text2video 会让语音池在路由时永远匹配不上（看起来配好了、其实不可用）。
+        defaults = {
+            "image": ("text2img", "img2img"),
+            "video": ("text2video", "img2video"),
+            "audio": ("text2audio", "audio2audio"),
+        }
+        base_support, extra_support = defaults.get(kind, defaults["image"])
+        supports = [base_support] + ([extra_support] if extra else [])
 
         def mutate(overlay: store.Overlay) -> dict[str, Any]:
             if not overlay.find_vendor(vendor_id):
@@ -261,7 +301,9 @@ class ConfigApi:
                 if base in existing:
                     # 已经配过的不重复添加，如实告诉用户跳过了哪些
                     located = overlay.locate_model(base)
-                    where = "图像" if located and located[0] == "image" else "视频"
+                    where = config.KIND_LABELS.get(
+                        located[0] if located else kind, kind
+                    )
                     skipped.append({"id": base, "model": name, "reason": f"已存在于{where}池"})
                     continue
                 if base in added:
@@ -287,7 +329,7 @@ class ConfigApi:
         result = store.save_with(mutate)
         created = result["created"]
         skipped = result["skipped"]
-        where = "图像" if kind == "image" else "视频"
+        where = config.KIND_LABELS.get(kind, kind)
         message = f"已添加 {len(created)} 个{where}模型" if created else "没有添加任何模型"
         if skipped:
             message += f"；跳过 {len(skipped)} 个（已存在）"
@@ -326,16 +368,6 @@ class ConfigApi:
         result = store.save_with(lambda overlay: overlay.set_enabled(model_id, enabled))
         return {"ok": True, **result}
 
-    def strategy_save(
-        self, _query: dict[str, list[str]], body: dict[str, Any]
-    ) -> dict[str, Any]:
-        if store.readonly_reason():
-            raise ApiError(store.readonly_reason(), 409)
-        kind = str(body.get("kind") or "").strip()
-        strategy = str(body.get("strategy") or "").strip()
-        result = store.save_with(lambda overlay: overlay.set_strategy(kind, strategy))
-        return {"ok": True, **result}
-
     def model_test(
         self, _query: dict[str, list[str]], body: dict[str, Any]
     ) -> dict[str, Any]:
@@ -349,6 +381,11 @@ class ConfigApi:
         entry, kind, model_name = self._resolve_model_for_test(body)
         if str(entry.get("provider") or "") == "native":
             raise ApiError("内置兜底模型不调用任何接口，无需测试；它也不能编辑，只能隐藏。")
+        # 语音不再特殊处理：目录里已经有 endpoints.audio，轻量预检走的是厂商的
+        # 只读校验接口（百炼 /tasks、OpenAI 兼容 /models），密钥和可达性都能验；
+        # 验不了模型名时，探测结果本身会如实标注「需要真实测试确认」。
+        # 早先这里硬拒语音，是担心拿图像端点去测 TTS 得出「没有默认地址」的
+        # 误导结论 —— 那个前提（目录里没有 audio 端点）已经不存在了。
         target = self._target_from_payload(
             {
                 "catalog_key": entry.get("catalog"),
@@ -467,7 +504,9 @@ class ConfigApi:
         if model_name and vendor_id:
             entry = dict(body)  # 表单里还没保存的条目
         else:
-            found = overlay.locate_model(model_id) if model_id else None
+            # 用**合并后**的行：页面上刚点过「隐藏」的手写模型只剩 id+enabled，
+            # 只看叠加层会把 provider / endpoint / params 全当成空的。
+            found = overlay.merged_model_row(model_id) if model_id else None
             if found is None:
                 raise ApiError(
                     "没有可测试的模型：请先填写模型名称，或在列表里点某个模型的「测试」"
@@ -476,8 +515,8 @@ class ConfigApi:
             vendor_id = str(entry.get("vendor") or "")
             model_name = str(entry.get("model") or model_id or "")
 
-        if kind not in ("image", "video"):
-            raise ApiError("模型类目缺失，无法测试")
+        if kind not in config.MODEL_KINDS:
+            raise ApiError(f"模型类目缺失或无法识别（{kind or '空'}），无法测试")
 
         vendor = overlay.find_vendor(vendor_id) if vendor_id else None
         if vendor_id and vendor is None:
@@ -545,7 +584,6 @@ ROUTES: dict[tuple[str, str], str] = {
     ("POST", "/api/models/bulk"): "models_bulk_add",
     ("DELETE", "/api/model"): "model_delete",
     ("POST", "/api/model/toggle"): "model_toggle",
-    ("POST", "/api/strategy"): "strategy_save",
     ("POST", "/api/model/test"): "model_test",
 }
 
@@ -591,6 +629,7 @@ class ConfigServer:
         #: 对没在服务的服务调 shutdown() 会永久阻塞（它在等一个永远不会设置的标志）。
         self._serving = threading.Event()
         self._page = ""
+        self._page_mtime = 0.0
         self._page_lock = threading.Lock()
 
     # ---------- 页面 ----------
@@ -605,12 +644,25 @@ class ConfigServer:
         return f"{self.origin}/"
 
     def _render_page(self) -> str:
+        """返回注入过 token 的页面 HTML。
+
+        **按文件 mtime 判断要不要重读**，不是"读一次就缓存到进程结束"。
+        页面是 skill 目录里的静态资源，升级/改样式后文件会变，而服务通常一直开着；
+        只缓存一次的话，用户 Ctrl+F5 也只会拿到进程启动那一刻的旧页面 ——
+        改了半天看不到变化，还以为是缓存或自己的问题。
+        """
         with self._page_lock:
-            if not self._page:
-                if not PAGE_FILE.exists():
-                    raise ApiError(f"页面资源缺失：{PAGE_FILE}")
+            try:
+                mtime = PAGE_FILE.stat().st_mtime
+            except OSError:
+                # 读不到文件（被删/权限）时，有旧页面就继续用，没有才报错
+                if self._page:
+                    return self._page
+                raise ApiError(f"页面资源缺失：{PAGE_FILE}") from None
+            if not self._page or mtime != self._page_mtime:
                 text = PAGE_FILE.read_text(encoding="utf-8")
                 self._page = text.replace(TOKEN_PLACEHOLDER, self.token)
+                self._page_mtime = mtime
             return self._page
 
     # ---------- 启动 ----------
@@ -819,9 +871,7 @@ def _make_handler(app: ConfigServer) -> type[BaseHTTPRequestHandler]:
                 raise ApiError(f"路径无法解析：{exc}") from exc
 
             # 只允许读产物目录 —— 否则这就是个任意文件读取漏洞。
-            # 产物默认落 cwd/outputs（沙箱友好），保留 skill/outputs 以兼容旧产物。
-            allowed = [config.DEFAULT_OUTPUT_DIR, config.SKILL_DIR / "outputs"]
-            if not any(_within(candidate, root.resolve()) for root in allowed):
+            if not any(_within(candidate, root) for root in preview_roots()):
                 raise ApiError("只能预览 outputs 目录里的生成结果", 403)
             if not candidate.is_file():
                 raise ApiError(f"文件不存在：{candidate}", 404)

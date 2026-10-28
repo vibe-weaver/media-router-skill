@@ -24,6 +24,17 @@ from typing import Any, Callable
 
 from . import catalog, config, health, miniyaml
 
+#: 最近一次「叠加层坏掉 → 备份后重建」的说明。
+#: bootstrap 会把它带进 warnings，用户下次刷新页面就知道发生过什么。
+LAST_REPAIR_NOTE = ""
+
+
+def _kind_hint() -> str:
+    """类目写错时的统一提示。写清"有哪些"比只说"错了"有用得多。"""
+    names = "、".join(f"{k}（{config.KIND_LABELS.get(k, k)}）" for k in config.MODEL_KINDS)
+    return f"模型类目只能是 {names}"
+
+
 OVERLAY_NAMES = ("models.web.yaml", "models.web.yml", "models.web.json")
 OVERLAY_DEFAULT = "models.web.yaml"
 
@@ -229,8 +240,11 @@ class Overlay:
         self.data.setdefault("vendors", [])
         if not isinstance(self.data["vendors"], list):
             raise config.ConfigError("models.web.yaml 的 vendors 必须是列表")
-        #: 手写层的原始数据，只读
-        self.base: dict[str, Any] = base if base is not None else config.base_layer()
+        #: 手写层的原始数据，只读。
+        #: soft=True：手写层写坏时按空层处理，页面还能打开（见 bootstrap 的告警）
+        self.base: dict[str, Any] = (
+            base if base is not None else config.base_layer(soft=True)
+        )
 
     # ---------- 查询 ----------
 
@@ -359,15 +373,30 @@ class Overlay:
                 return kind, item
         return None
 
-    def models_of_vendor(self, vendor_id: str) -> list[str]:
-        """引用该厂商的模型 id（两层都算，级联删除时要一并遮掉）。"""
-        seen: list[str] = []
-        for _kind, item in self.all_models() + self.base_models():
-            if str(item.get("vendor") or "") == vendor_id:
-                mid = str(item.get("id"))
-                if mid not in seen:
-                    seen.append(mid)
-        return seen
+    def merged_model_row(
+        self, model_id: str
+    ) -> tuple[str, dict[str, Any], str] | None:
+        """两层合并后的「当前生效」条目（手写层打底、叠加层字段覆盖）。
+
+        表单回填、启停状态、内置条目判断都应该看这一份：只看叠加层的话，
+        页面上刚点过「隐藏」的手写模型就只剩 ``{id, enabled}`` 两个字段，
+        再编辑时会把 provider / endpoint / params 之类全当成"原来没有"。
+        """
+        located = self.locate_model(model_id)
+        if located is None:
+            return None
+        kind, item, layer = located
+        if layer != "overlay":
+            return located
+        base_item = next(
+            (row for _k, row in self.base_models() if str(row.get("id")) == model_id),
+            None,
+        )
+        if base_item is None:
+            return located
+        merged = {k: v for k, v in base_item.items() if k != config.TOMBSTONE_KEY}
+        merged.update(item)
+        return kind, merged, layer
 
     def _pools(self) -> dict[str, list[dict[str, Any]]]:
         out: dict[str, list[dict[str, Any]]] = {}
@@ -385,8 +414,8 @@ class Overlay:
             self.data[kind] = node
         elif not isinstance(node.get("models"), list):
             # 只补 models 这一项。原来这里是把整个节点换成默认值，于是叠加层里
-            # `image: {strategy: weight_only}`（还没写 models）一旦被页面加进
-            # 第一个模型，用户自己指定的策略就被悄悄冲回 priority_then_weight。
+            # 已经有 `strategy`、但还没写 models 的池子，一旦被页面加进第一个模型，
+            # 节点里的 strategy 就被悄悄冲掉。
             node["models"] = []
         return node["models"]
 
@@ -435,11 +464,29 @@ class Overlay:
             "label": label,
         }
 
+        # 这两段要能表达「用户把它清空了」。字段级合并的语义是"没写的键沿用底稿"，
+        # 所以清空时必须在叠加层里显式写一个空映射，否则手写层里的旧地址/旧参数
+        # 会在合并时又浮上来 —— 页面上看着删掉了，实际还在用。
+        base_row = next(
+            (v for v in self.base_vendors() if str(v.get("id")) == vendor_id), None
+        )
+        existing_endpoints: dict[str, Any] = {}
+        existing_options: dict[str, Any] = {}
+        for source in (base_row if layer == "overlay" else None, existing):
+            if not isinstance(source, dict):
+                continue
+            if isinstance(source.get("endpoints"), dict):
+                existing_endpoints.update(source["endpoints"])
+            if isinstance(source.get("options"), dict):
+                existing_options.update(source["options"])
+
         # 自定义接口（generic_http）靠 options 描述请求形状，界面必须能填，
         # 否则选中「自定义接口」就是死路 —— 能选但永远跑不起来。
         raw_options = coerce_options(payload.get("options"))
         if raw_options:
             item["options"] = raw_options
+        elif "options" in payload and existing_options:
+            item["options"] = {}
 
         # 接口地址：与目录默认值相同的就不写，保持文件干净、也方便以后升级默认值
         defaults = entry.endpoints or {}
@@ -451,6 +498,8 @@ class Overlay:
             endpoints[str(kind)] = text
         if endpoints:
             item["endpoints"] = endpoints
+        elif "endpoints" in payload and existing_endpoints:
+            item["endpoints"] = {}
 
         messages: list[str] = []
 
@@ -464,9 +513,20 @@ class Overlay:
             if not requested:
                 requested = f"{entry.provider.upper()}_API_KEY"
 
-            if existing and existing.get("api_key_env"):
-                # 编辑时环境变量名保持不变 —— 变的会是一次性换名，把已有密钥弄丢
-                env = str(existing["api_key_env"])
+            existing_env = str(existing.get("api_key_env") or "") if existing else ""
+            # 同一个平台继续沿用原来的环境变量名（否则编辑一次就换名、把已有密钥弄丢）；
+            # 但**换了平台卡片**时必须重新推导 —— 否则硅基流动的 Key 会被写进
+            # ZHIPU_API_KEY，页面上还显示旧变量名，连带弄坏其它读同一变量的模型。
+            existing_catalog = str(existing.get("catalog") or "").strip() if existing else ""
+            same_platform = bool(existing) and (
+                (existing_catalog and existing_catalog == entry.key)
+                or (
+                    not existing_catalog
+                    and str(existing.get("provider") or "") == entry.provider
+                )
+            )
+            if existing and existing_env and same_platform:
+                env = existing_env
             else:
                 used = self._used_env_names(vendor_id)
                 env = requested if requested not in used else _unique_env(
@@ -475,6 +535,11 @@ class Overlay:
                 if env != requested:
                     messages.append(
                         f"为避免和已有厂商共用密钥，本次密钥记为 {env}"
+                    )
+                if existing_env and not same_platform:
+                    messages.append(
+                        f"平台已更换，密钥变量名改为 {env}"
+                        f"（原来是 {existing_env}；旧变量里的密钥不会被自动迁移）"
                     )
             item["api_key_env"] = env
 
@@ -517,9 +582,17 @@ class Overlay:
             raise config.ConfigError(f"找不到厂商：{vendor_id}")
         existing, _layer = located
 
-        dropped = set(self.models_of_vendor(vendor_id))
         # 级联删除引用它的模型 —— 否则那些模型会因为没有 provider 把整份配置弄坏，
         # 而用户只会看到"页面打不开了"。宁可明确删掉并如实告知。
+        #
+        # 判断依据必须是**当前生效**的 vendor（两层合并后的结果），不是"任一层引用过"：
+        # 一条模型从 v1 迁到 v2 之后，手写层里那句 `vendor: v1` 还在，按 id 级联会
+        # 把这条仍在 v2 下正常工作的模型一起删掉。
+        dropped: set[str] = set()
+        for model_id in self.model_ids():
+            merged = self.merged_model_row(model_id)
+            if merged is not None and str(merged[1].get("vendor") or "") == vendor_id:
+                dropped.add(model_id)
         for kind, bucket in self._pools().items():
             keep = [m for m in bucket if str(m.get("id")) not in dropped]
             if len(keep) != len(bucket):
@@ -578,10 +651,30 @@ class Overlay:
 
     # ---------- 模型 ----------
 
+    @staticmethod
+    def _modalities_of(
+        payload: dict[str, Any],
+        which: str,
+        kind: str,
+        supports: list[str],
+        previous_row: dict[str, Any] | None,
+    ) -> list[str]:
+        """取一条模型的输入/输出模态。
+
+        优先用这次提交的值；表单没带（批量添加、旧页面、直接调 API）时沿用
+        已有的值 —— 不能因为"这次没提交"就把用户之前标好的功能标签清空。
+        两层都没有才按类目 + supports 推默认值。
+        """
+        field = f"{which}_modalities"
+        raw = payload.get(field)
+        if raw is None and previous_row is not None:
+            raw = previous_row.get(field)
+        return config.normalize_modalities(raw, kind, supports, which)
+
     def upsert_model(self, payload: dict[str, Any]) -> dict[str, Any]:
         kind = str(payload.get("kind") or "").strip()
-        if kind not in ("image", "video"):
-            raise config.ConfigError("模型类目只能是 image（图像）或 video（视频）")
+        if kind not in config.MODEL_KINDS:
+            raise config.ConfigError(_kind_hint())
 
         model_name = str(payload.get("model") or "").strip()
         if not model_name:
@@ -592,10 +685,13 @@ class Overlay:
         if created:
             model_id = _unique_id(_slug(model_name) or "model", self.model_ids())
 
-        # 编辑时可能对着一条手写层的模型下手，所以要在两层里找
+        # 编辑时可能对着一条手写层的模型下手，所以要在两层里找。
+        # previous_row 用**合并后**的行：表单里没体现的字段（endpoint / options /
+        # params / 内联密钥）要按"当前实际生效的样子"继承，而不是只看某一层。
         located = self.locate_model(model_id)
         previous = self.find_model(model_id)
-        previous_row = located[1] if located is not None else None
+        merged = self.merged_model_row(model_id)
+        previous_row = merged[1] if merged is not None else None
 
         # 内置兜底条目（provider: native）是随 skill 出厂的能力，页面只允许
         # 隐藏（走 set_enabled），不允许改名、改优先级、改能力或增删 ——
@@ -640,7 +736,23 @@ class Overlay:
                 f"实际是 {type(supports_raw).__name__}"
             )
         if not supports:
-            supports = ["text2img"] if kind == "image" else ["text2video"]
+            # 默认能力必须跟着类目走：audio 以前也落进 else，被存成 text2video，
+            # 于是语音模型在路由阶段永远匹配不上 text2audio（配了等于没配）。
+            supports = {
+                "image": ["text2img"],
+                "video": ["text2video"],
+                "audio": ["text2audio"],
+            }.get(kind, ["text2img"])
+
+        # 输入/输出模态：功能标签。
+        # 页面每次都提交两个完整数组，所以这里没有"清空某个模态"的歧义；
+        # 表单没带这两个键时（批量添加、早期页面）沿用已有值，没有就按类目推默认值。
+        input_modalities = self._modalities_of(
+            payload, "input", kind, supports, previous_row
+        )
+        output_modalities = self._modalities_of(
+            payload, "output", kind, supports, previous_row
+        )
 
         # 编辑时保留原有的启用状态：表单里没有这个开关，不能顺手把停用的模型开回来。
         # 手写层的条目也要读到 —— 否则改一下手写层里停用的模型就把它激活了。
@@ -658,9 +770,15 @@ class Overlay:
             "weight": weight,
             "enabled": enabled,
             "supports": supports,
+            "input_modalities": input_modalities,
+            "output_modalities": output_modalities,
         }
         if label and label != model_name:
             item["label"] = label
+        elif previous_row is not None and previous_row.get("label"):
+            # 用户把「显示名称」清空了：显式写一个空串，否则字段级合并会让
+            # 手写层里的旧 label 又冒出来（合并规则是"没写的键沿用底稿"）。
+            item["label"] = ""
 
         # 生成参数（params）：尺寸/时长这类"每次生成都想固定用"的规格。
         # 合并规则：原有 params（可能来自手写层）打底，本次表单提交的键覆盖；
@@ -688,22 +806,11 @@ class Overlay:
 
         if vendor_id:
             item["vendor"] = vendor_id
-        else:
-            # 没选厂商 = 在编辑一条内联 provider 的模型（手写层里都是这种写法）。
-            # 把它的 provider / 密钥变量 / 地址 / params 原样搬过来，
-            # 只让用户在这次编辑里真正改到的东西生效（优先级、权重、名字、能力）。
-            for field in ("provider", "api_key_env", "endpoint"):
-                value = previous_row.get(field) if previous_row else None
-                if value:
-                    item[field] = value
-            for field in ("params", "options"):
-                value = previous_row.get(field) if previous_row else None
-                if isinstance(value, dict) and value:
-                    # params 例外：上面已经做过"原有打底 + 本次覆盖"的合并，
-                    # 这里再照搬会把用户在表单里改的尺寸/时长冲掉。
-                    if field == "params" and isinstance(payload.get("params"), dict):
-                        continue
-                    item[field] = dict(value)
+        # 没选厂商 = 在编辑一条内联 provider 的模型（手写层里都是这种写法）。
+        # 这里**不再**把 provider / api_key_env / endpoint / options 抄进叠加层：
+        # 读配置时 _dedupe_last 会把叠加层字段合到同 id 的手写条目上，缺的字段
+        # 自然沿用底稿。抄一遍反而会把内联密钥、私有网关地址复制进
+        # models.web.yaml —— 那份文件按承诺是不含密钥的。
 
         # 用户可能正在把一条被隐藏/被盖掉的模型改回来，把墓碑清掉
         self._drop_tombstone(model_id)
@@ -734,7 +841,7 @@ class Overlay:
             self._ensure_pool(kind).append(item)
 
         verb = "已添加" if created else "已更新"
-        where = "图像" if kind == "image" else "视频"
+        where = config.KIND_LABELS.get(kind, kind)
         return {
             "id": model_id,
             "created": created,
@@ -746,13 +853,15 @@ class Overlay:
         found = self.locate_model(model_id)
         if found is None:
             raise config.ConfigError(f"找不到模型：{model_id}")
-        kind, item, _layer = found
-        if str(item.get("provider") or "") == "native":
+        kind, _item, _layer = found
+        merged = self.merged_model_row(model_id)
+        current = merged[1] if merged is not None else _item
+        if str(current.get("provider") or "") == "native":
             raise config.ConfigError(
                 "内置兜底模型不能删除：它不调用任何接口，也不会产生费用。"
                 "不想让它参与调度，请用「隐藏」。"
             )
-        name = str(item.get("model") or model_id)
+        name = str(current.get("model") or model_id)
 
         # 叠加层里的条目直接摘掉
         node = self.data.get(kind)
@@ -789,53 +898,29 @@ class Overlay:
         if found is None:
             raise config.ConfigError(f"找不到模型：{model_id}")
         kind, item, layer = found
-        name = str(item.get("model") or model_id)
+        merged = self.merged_model_row(model_id)
+        current = merged[1] if merged is not None else item
+        name = str(current.get("model") or model_id)
 
         if layer == "overlay":
             previous = self.find_model(model_id)
             if previous is not None:
                 previous[1]["enabled"] = bool(enabled)
         else:
-            # 手写层里的条目：在叠加层写一条同 id 的覆盖条目，只改启用状态，
-            # 其余字段照抄手写层的，保证除状态外一切不变。
+            # 手写层里的条目：叠加层只写「同 id + enabled」这一条。
+            # 读配置时字段级合并会把这一条合到同 id 的手写条目上，其余字段
+            # （provider / endpoint / options / 内联 api_key）一个字都不用抄 ——
+            # 以前整条拷贝，会把手写层里的明文密钥复制进 models.web.yaml，
+            # 而那份文件按 README 和文件头注释的承诺是不含密钥的。
             self._drop_tombstone(model_id)
-            override = {
-                k: v for k, v in item.items() if k != config.TOMBSTONE_KEY
-            }
-            override["id"] = model_id
-            override["enabled"] = bool(enabled)
             pool = self._ensure_pool(kind)
             pool[:] = [m for m in pool if str(m.get("id")) != model_id]
-            pool.append(override)
+            pool.append({"id": model_id, "enabled": bool(enabled)})
 
         return {
             "id": model_id,
             "enabled": bool(enabled),
             "message": f"模型「{name}」已{'启用' if enabled else '停用'}",
-        }
-
-    def set_strategy(self, kind: str, strategy: str) -> dict[str, Any]:
-        """改某个模型池的路由策略，只写叠加层。"""
-        kind = str(kind or "").strip()
-        if kind not in ("image", "video"):
-            raise config.ConfigError("模型类目只能是 image（图像）或 video（视频）")
-        strategy = str(strategy or "").strip()
-        if strategy not in config.VALID_STRATEGIES:
-            raise config.ConfigError(
-                "strategy 只能是 " + "、".join(config.VALID_STRATEGIES)
-            )
-        self._ensure_pool(kind)
-        self.data[kind]["strategy"] = strategy
-        node = self.data[kind]
-        # 不要留下空的 models: []。_prune_empty_pools 会把这种节点整个删掉，
-        # 于是"基础层有模型、叠加层只改策略"的池子会静默丢掉刚写的策略。
-        if isinstance(node.get("models"), list) and not node["models"]:
-            node.pop("models", None)
-        label = "图像" if kind == "image" else "视频"
-        return {
-            "kind": kind,
-            "strategy": strategy,
-            "message": f"{label}模型策略已改为 {strategy}",
         }
 
     # ---------- 落盘 ----------
@@ -933,6 +1018,20 @@ def _model_view(
     if isinstance(supports, str):
         supports = [s.strip() for s in supports.split(",") if s.strip()]
     params = item.get("params")
+    # 模态是标注字段：手写层里没写时按类目 + supports 推默认值，
+    # 页面拿到的永远是可显示的两个数组，不用自己再判空兜底。
+    # 内置兜底（native）例外：它不吃也不吐，只是把请求交回 agent 自己的工具，
+    # 给它贴「输入 文本/图片 → 输出 图片」等于把兜底伪装成真模型。
+    if str(item.get("provider") or vendor.get("provider") or "") == "native":
+        input_modalities: list[str] = []
+        output_modalities: list[str] = []
+    else:
+        input_modalities = config.normalize_modalities(
+            item.get("input_modalities"), kind, supports, "input"
+        )
+        output_modalities = config.normalize_modalities(
+            item.get("output_modalities"), kind, supports, "output"
+        )
     return {
         "id": model_id,
         "kind": kind,
@@ -946,6 +1045,8 @@ def _model_view(
         "weight": weight,
         "enabled": config.coerce_enabled(item.get("enabled", True)),
         "supports": [str(s) for s in supports],
+        "input_modalities": input_modalities,
+        "output_modalities": output_modalities,
         # 生成参数（尺寸/时长等）。页面用它回填"生成规格"输入框。
         "params": dict(params) if isinstance(params, dict) else {},
         # 这条是用户手写在 models.yaml 里的，还是在配置页面里建的？
@@ -982,7 +1083,8 @@ def bootstrap(host: str = "127.0.0.1") -> dict[str, Any]:
     paths: list[Path] = []
 
     try:
-        data, paths, _overlay = config.load_raw(allow_missing=True)
+        data, paths, _overlay, skipped = config.load_raw_tolerant(allow_missing=True)
+        warnings.extend(skipped)
     except config.ConfigError as exc:
         warnings.append(f"{exc}（配置页面仍可打开，保存后会修正）")
     except Exception as exc:  # noqa: BLE001 - 语法错误不能让页面打不开
@@ -1019,7 +1121,16 @@ def bootstrap(host: str = "127.0.0.1") -> dict[str, Any]:
                     vid = str(item.get("vendor") or "")
                     counts[vid] = counts.get(vid, 0) + 1
 
-    base_layer = config.base_layer()
+    # 手写层写坏时 base_layer 会抛错：页面必须还能打开（哪怕手写层的
+    # 「哪些模型是手写的」信息暂时缺失），否则用户只能去命令行改文件。
+    try:
+        base_layer = config.base_layer()
+    except (config.ConfigError, OSError) as exc:
+        base_layer = {}
+        warnings.append(
+            f"手写的 models.yaml 暂时读不出来（{exc}）；页面仍可查看和编辑页面里建的模型，"
+            f"或直接改 models.yaml 修好它"
+        )
     base_ids = {
         str(item.get("id")) for _kind, item in config.layer_models(base_layer)
     }
@@ -1083,22 +1194,12 @@ def bootstrap(host: str = "127.0.0.1") -> dict[str, Any]:
                     row.get("cooldown_remaining_seconds") or 0.0
                 )
 
-    kinds = list(models)
-    for extra in ("image", "video"):
-        if extra not in kinds:
-            kinds.append(extra)
-
-    # 每个池子的路由策略。页面要靠它决定"固定分档"还是"全局权重"，不能靠猜。
-    # 非法值在这里就归一成默认策略，和 load_config 的运行时行为保持一致；
-    # 原始写法在 config 命令/页面的 warnings 里另有提示。
-    strategies = {}
-    for key, value in data.items():
-        if not isinstance(value, dict):
-            continue
-        if not (isinstance(value.get("models"), list) or "strategy" in value):
-            continue
-        raw = str(value.get("strategy") or "").strip()
-        strategies[key] = raw if raw in config.VALID_STRATEGIES else "priority_then_weight"
+    # 页签固定出这三个已知类目，顺序 image → video → audio，**不看配置里有没有这个池**：
+    # 池子可以事后由页面创建（upsert_model 会 _ensure_pool），少一个池就没页签的话，
+    # 用户永远没法在页面里把语音模型加回来。
+    # 也不把自定义池塞进来：模态/规格表渲染不出来，写回又会被类目校验拒掉，
+    # 那只是个"点一下就报错"的死页签。
+    kinds = list(config.MODEL_KINDS)
 
     # 引用了不存在的厂商的模型，等于运行时一定会失败，提前点出来
     for kind, bucket in models.items():
@@ -1110,6 +1211,12 @@ def bootstrap(host: str = "127.0.0.1") -> dict[str, Any]:
                 )
 
     # 同一句话不重复说（load_raw 与 load_config 可能报同一个错）
+    global LAST_REPAIR_NOTE
+    if LAST_REPAIR_NOTE:
+        # 刚才保存时重建过叠加层：这次刷新必须告诉用户，否则他会以为
+        # 「我明明配过厂商和模型，怎么全没了」。说过一次就清掉。
+        warnings.append(LAST_REPAIR_NOTE)
+        LAST_REPAIR_NOTE = ""
     deduped: list[str] = []
     for text in warnings:
         if text and text not in deduped:
@@ -1121,7 +1228,6 @@ def bootstrap(host: str = "127.0.0.1") -> dict[str, Any]:
         "catalog": catalog.as_dict(),
         "vendors": vendors,
         "models": models,
-        "strategies": strategies,
         "kinds": kinds,
         "warnings": deduped,
         "readonly": readonly_reason(),
@@ -1155,7 +1261,26 @@ def save_with(mutate: Callable[[Overlay], Any]) -> Any:
     """
     with _WRITE_LOCK:
         _guard_writable()
-        overlay = Overlay(read_overlay())
+        global LAST_REPAIR_NOTE
+        try:
+            data = read_overlay()
+        except config.ConfigError as exc:
+            # 叠加层自己坏了：先原样备份，再从空白重建。
+            # 不这么做的话，页面会陷入「模型看得见、怎么保存都说解析失败」的死循环，
+            # 而 models.web.yaml 是页面自己的文件，重建它比让用户去命令行修更合理。
+            path = overlay_path()
+            backup = path.with_name(
+                f"{path.name}.broken-{time.strftime('%Y%m%d-%H%M%S')}.bak"
+            )
+            note = f"{path.name} 解析失败（{exc}），已从空白重建"
+            try:
+                backup.write_bytes(path.read_bytes())
+                note += f"；原文件已备份为 {backup.name}"
+            except OSError:
+                note += "；原文件备份失败，内容可能已丢失"
+            LAST_REPAIR_NOTE = note
+            data = {"version": 1}
+        overlay = Overlay(data)
         result = mutate(overlay)
         overlay._prune_empty_pools()  # noqa: SLF001 - 同类协作
         write_structured(overlay_path(), overlay.data, HEADER)
