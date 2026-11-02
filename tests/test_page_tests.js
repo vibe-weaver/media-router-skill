@@ -27,16 +27,16 @@ function deferred() {
   const promise = new Promise((a, b) => { resolve = a; reject = b; });
   return {promise, resolve, reject};
 }
-function setup(confirm, request) {
+function setup(confirm, request, failFast = true) {
   const calls = [], buttons = [{dataset:{mid:'tts',act:'test-model'}, disabled:false, closest(){ return null; }},
     {dataset:{mid:'tts',act:'real-test-model'}, disabled:false, closest(){ return null; }}];
-  const box = {innerHTML: '旧结果'};
+  const box = {innerHTML: '旧结果'}, control = {checked:failFast};
   const entered = deferred();
   const context = {
     console, Set, Object, String, JSON, encodeURIComponent,
     modelTestsPending: new Set(), modelTestResults: new Map(),
     document: {querySelectorAll() { return buttons; }, createElement() { return {innerHTML:''}; }}, fetch:denyNetwork,
-    el(id) { return id === 'test-fail-fast' ? {checked:true} : null; },
+    el(id) { return id === 'test-fail-fast' ? control : null; },
     uiConfirm: confirm,
     api: async (p, opts) => { calls.push({path:p, options:opts}); entered.resolve(); return request(); },
     renderChecks(target, result) { target.innerHTML = result.summary; },
@@ -47,7 +47,7 @@ function setup(confirm, request) {
     if (html.includes('function ' + name + '(')) funcs.push(name);
   }
   vm.runInContext(funcs.map(extract).join('\n') + '\nthis.run = testModel;', context);
-  return {context, calls, buttons, box, entered: entered.promise};
+  return {context, calls, buttons, box, control, entered: entered.promise};
 }
 let passed = 0;
 async function test(name, fn) { await fn(); passed++; console.log('[PASS] ' + name); }
@@ -90,6 +90,30 @@ const watchdog = setTimeout(() => { console.error('测试未完成（未决Promi
     request.resolve({ok:true, real_call:{ok:true, files:[], elapsed_ms:20, notes:[]}});
     await first;
     assert(s.buttons.every(b => !b.disabled));
+  });
+  await test('免费与真实测试都读取当前开关值，不保存配置或额外提交', async () => {
+    for (const deep of [false, true]) {
+      const s = setup(async () => true, () => ({ok:true, summary:'预检通过', real_call:{ok:true, files:[]}}), false);
+      await s.context.run(s.box, {id:'tts'}, deep);
+      s.control.checked = true;
+      await s.context.run(s.box, {id:'tts'}, deep);
+      assert.strictEqual(s.calls.length, 2);
+      assert.deepStrictEqual(s.calls.map(call => JSON.parse(call.options.body).fail_fast), [false, true]);
+      assert(s.calls.every(call => call.path === '/api/model/test'));
+      assert(s.calls.every(call => JSON.parse(call.options.body).deep === deep));
+      assert(s.buttons.every(button => !button.disabled));
+    }
+  });
+  await test('确认弹窗期间切换只影响下次测试，不修改已发起策略', async () => {
+    const confirm = deferred();
+    const s = setup(() => confirm.promise, () => ({ok:true, real_call:{ok:true, files:[]}}), false);
+    const running = s.context.run(s.box, {id:'tts'}, true);
+    s.control.checked = true;
+    confirm.resolve(true);
+    await running;
+    assert.strictEqual(s.calls.length, 1);
+    assert.strictEqual(JSON.parse(s.calls[0].options.body).fail_fast, false);
+    assert.strictEqual(s.control.checked, true);
   });
   await test('本次音频成功显示播放器、档案、耗时与验收边界', async () => {
     const file = 'C:\\测试 目录\\语音.wav';

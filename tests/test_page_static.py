@@ -5,6 +5,7 @@
 """
 
 from pathlib import Path
+import re
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -103,6 +104,48 @@ check('data-act="test-model"' in PAGE and 'data-act="real-test-model"' in PAGE,
 check('class="actions-row"' in PAGE, "卡片按钮收在独立容器里（窄屏整体换行）")
 check('id="test-fail-fast"' in PAGE and 'fail_fast:' in PAGE, "测试可选择临时首次失败即停策略")
 check('不保证实际生成成功' in PAGE, "免费预检如实说明验证边界")
+
+# 临时严格策略：原生 checkbox 维持状态，外观是立体按压按钮，不受满宽输入框样式干扰。
+_fast_input = re.search(r'<input\b[^>]*\bid="test-fail-fast"[^>]*>', PAGE)
+_fast_tag = _fast_input.group(0) if _fast_input else ""
+check(PAGE.count('id="test-fail-fast"') == 1 and 'type="checkbox"' in _fast_tag,
+      "严格测试保留唯一原生 checkbox，供请求读取 checked")
+check(not re.search(r'\bchecked(?:\s|=|>)', _fast_tag), "严格测试默认关闭")
+check('aria-labelledby="test-fail-fast-title"' in _fast_tag and 'id="test-fail-fast-title"' in PAGE,
+      "立体按钮有明确的无障碍名称")
+check('aria-describedby="test-fail-fast-help test-fail-fast-billing test-fail-fast-persistence"' in _fast_tag,
+      "控件关联作用说明与费用提醒")
+check('class="test-stop-panel"' in PAGE and 'class="test-stop-control"' in PAGE and
+      'class="test-stop-button"' in PAGE, "立体按钮与旁边说明有独立局部布局")
+check('已关闭 · 点击开启' in PAGE and '已开启 · 点击关闭' in PAGE,
+      "开启与关闭都有文字状态，不只依赖颜色")
+_css = PAGE.split('<style>', 1)[1].split('</style>', 1)[0]
+check('.test-stop-control input:checked + .test-stop-button' in _css,
+      "原生选中状态驱动立体按压外观")
+check('.test-stop-control input:focus-visible + .test-stop-button' in _css,
+      "键盘焦点显示在可见按钮上")
+check('prefers-reduced-motion:reduce' in _css and 'forced-colors:active' in _css,
+      "局部按钮兼容减少动态与系统高对比模式")
+check(re.search(r'@media\s*\(max-width:620px\)\s*\{\s*\.test-stop-panel\s*\{[^}]*grid-template-columns:1fr', _css) is not None,
+      "窄屏时按钮与说明纵向排列")
+check('检测到失败就停止后续检查' in PAGE and '查询、下载错误不再自动重试' in PAGE and
+      '排查密钥、接口或参数问题' in PAGE and '预检警告不一定阻止真实生成' in PAGE,
+      "开启说明区分失败停止、重试与不拦截的预检警告")
+check('查询、下载遇到临时网络问题' in PAGE and '生成提交本身仍不会自动重发' in PAGE,
+      "关闭说明不误导用户认为生成提交会重发")
+check('排队中 / 生成中' in PAGE and '仍会继续查询' in PAGE,
+      "说明正常等待不会被当作错误中断")
+check('这不是免费开关' in PAGE and '真实测试仍需确认并可能收费' in PAGE and
+      '不能撤销已受理的任务' in PAGE, "费用与已受理任务边界明确")
+check('仅影响随后发起的模型测试' in PAGE and '不修改模型配置' in PAGE,
+      "说明偏好只影响后续测试而不改变模型配置")
+check('首次接入平台' in PAGE and '更换密钥或接口' in PAGE and '调整模型参数后' in PAGE,
+      "说明具体建议开启的排错场景")
+check('日常验证' in PAGE and '临时网络波动' in PAGE,
+      "说明日常测试可关闭以保留有界重试")
+check('id="test-fail-fast-persistence"' in PAGE and 'role="status"' in PAGE and
+      '同一地址刷新后保留' in PAGE and '更换浏览器或地址后需重新选择' in PAGE,
+      "如实说明保存范围并可报告存储失败")
 check('const modelTestsPending = new Set()' in PAGE, "同模型测试共享处理中锁")
 check("\naudio:" in CONFIG or CONFIG.startswith("audio:"), "models.yaml 有语音模型池")
 

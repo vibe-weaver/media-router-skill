@@ -126,6 +126,73 @@ button.sm:hover:not(:disabled){background:linear-gradient(180deg,#ffffff,#f5f8fd
 button.sm.danger{color:var(--err); border-color:#eebfb9;
   background:linear-gradient(180deg,#ffffff 0%,#fdf0ee 100%)}
 button.sm.danger:hover:not(:disabled){background:linear-gradient(180deg,#ffffff,#fbe4e1); color:var(--err)}
+/* 本次测试策略：保留原生 checkbox 的键盘与 checked 语义，按钮外观只由 CSS 驱动。 */
+.test-stop-panel{
+  display:grid; grid-template-columns:220px minmax(0,1fr); gap:22px;
+  margin:16px 0; padding:20px; border:1px solid #cbd9f1; border-radius:16px;
+  background:linear-gradient(135deg,#f7faff 0%,#fff 70%);
+  box-shadow:var(--sh-sm), var(--hi);
+}
+.test-stop-toggle{min-width:0; padding:4px 0}
+.test-stop-control{position:relative; display:block; cursor:pointer; -webkit-tap-highlight-color:transparent}
+.test-stop-control input{
+  position:absolute; inset:0; z-index:1; width:100%; height:100%; margin:0;
+  padding:0; border:0; opacity:0; cursor:pointer;
+}
+.test-stop-button{
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:9px;
+  min-height:136px; padding:18px 12px; border:1px solid #b7c5dc; border-radius:14px;
+  color:#34445f; text-align:center; background:linear-gradient(180deg,#fff 0%,#edf2fa 100%);
+  box-shadow:inset 0 1px 0 #fff, 0 5px 0 #b4c1d7, 0 9px 14px -5px rgba(38,58,94,.28);
+  transition:transform .12s, background .15s, box-shadow .12s, border-color .15s;
+}
+.test-stop-symbol{
+  display:grid; place-items:center; width:34px; height:34px; border-radius:50%;
+  color:#687a96; background:#e7edf7; box-shadow:inset 0 1px 3px rgba(20,25,34,.13), 0 1px 0 #fff;
+}
+.test-stop-symbol svg{display:block; width:21px; height:21px}
+.test-stop-title{font-size:17px; font-weight:800; line-height:1.4}
+.test-stop-status{font-size:13px; font-weight:600; line-height:1.4}
+.test-stop-status-on{display:none}
+.test-stop-control:hover .test-stop-button{border-color:#8da8d4; background:linear-gradient(180deg,#fff,#e6eefc)}
+.test-stop-control:active .test-stop-button{transform:translateY(3px);
+  box-shadow:inset 0 1px 0 #fff, 0 2px 0 #a4b5d1, 0 4px 8px -4px rgba(38,58,94,.3)}
+.test-stop-control input:checked + .test-stop-button{
+  transform:translateY(3px); color:#fff; border-color:#214db5; background:var(--grad-accent);
+  box-shadow:inset 0 2px 4px rgba(14,43,111,.24), inset 0 1px 0 rgba(255,255,255,.25),
+    0 2px 0 #193f99, 0 5px 10px -4px rgba(37,99,235,.42);
+}
+.test-stop-control input:checked + .test-stop-button .test-stop-symbol{
+  color:#fff; background:rgba(255,255,255,.16); box-shadow:inset 0 1px 3px rgba(11,39,106,.2);
+}
+.test-stop-control input:checked + .test-stop-button .test-stop-status-off{display:none}
+.test-stop-control input:checked + .test-stop-button .test-stop-status-on{display:inline}
+.test-stop-control input:focus-visible + .test-stop-button{outline:3px solid var(--accent); outline-offset:5px}
+.test-stop-scope{margin:16px 0 0; color:var(--muted); font-size:12.5px; line-height:1.7; text-align:center}
+.test-stop-help{min-width:0}
+.test-stop-help h3{margin:0 0 9px; font-size:15.5px}
+.test-stop-explain{margin:0; padding:0; list-style:none; color:#45536b; font-size:13.5px; line-height:1.75}
+.test-stop-explain li + li{margin-top:7px}
+.test-stop-explain strong{color:var(--text); font-weight:700}
+.test-stop-billing{
+  margin:12px 0 0; padding:10px 12px; border:1px solid #eddbb1; border-radius:10px;
+  color:#735018; background:#fff9ec; font-size:13px; line-height:1.7;
+}
+.test-stop-billing strong{color:#69430b}
+@media(max-width:620px){
+  .test-stop-panel{grid-template-columns:1fr; gap:18px; padding:16px}
+  .test-stop-toggle{display:grid; grid-template-columns:minmax(0,1fr); justify-items:stretch}
+  .test-stop-button{min-height:110px; gap:7px; padding:14px}
+  .test-stop-scope{margin-top:13px}
+}
+@media(prefers-reduced-motion:reduce){.test-stop-button{transition:none}}
+@media(forced-colors:active){
+  .test-stop-panel,.test-stop-billing{border-color:CanvasText}
+  .test-stop-button{background:ButtonFace; color:ButtonText; border:2px solid ButtonText; box-shadow:none}
+  .test-stop-control input:checked + .test-stop-button{background:Highlight; color:HighlightText; border-color:Highlight; box-shadow:none}
+  .test-stop-control input:focus-visible + .test-stop-button{outline-color:Highlight}
+  .test-stop-symbol{background:transparent; color:inherit; box-shadow:none}
+}
 /* 输入控件：内阴影 = 凹槽，看起来像刻进卡片里 */
 input,select,textarea{
   font-family:inherit; font-size:15.5px; font-weight:600; padding:10px 13px;
@@ -594,9 +661,37 @@ details.pathbar .paths{
     <div id="prob-summary" data-page-node-id="SYvV2jyl43sSDY3y7uvpB8"></div>
   </div>
 
-  <div class="note" style="margin-top:12px">
-    <label><input type="checkbox" id="test-fail-fast"> 首次失败即停（仅本次测试，不保存到模型配置）</label>
-    <div class="hint">开启后不自动重试；正常任务等待仍会轮询。免费预检只检查可达性、密钥和能确认的模型信息，不保证实际生成成功；真实测试需要确认并消耗额度。</div>
+  <div class="test-stop-panel">
+    <div class="test-stop-toggle">
+      <label class="test-stop-control">
+        <input type="checkbox" id="test-fail-fast" aria-labelledby="test-fail-fast-title"
+          aria-describedby="test-fail-fast-help test-fail-fast-billing test-fail-fast-persistence">
+        <span class="test-stop-button">
+          <span class="test-stop-symbol" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M12 3v8"></path><path d="M6.3 5.8a8 8 0 1 0 11.4 0"></path>
+            </svg>
+          </span>
+          <span class="test-stop-title" id="test-fail-fast-title">首次失败即停</span>
+          <span class="test-stop-status" aria-hidden="true">
+            <span class="test-stop-status-off">已关闭 · 点击开启</span>
+            <span class="test-stop-status-on">已开启 · 点击关闭</span>
+          </span>
+        </span>
+      </label>
+      <p class="test-stop-scope">仅影响随后发起的模型测试，不修改模型配置。<br>不影响正在进行的测试，也不影响厂商测试或命令行。</p>
+      <p class="test-stop-scope" id="test-fail-fast-persistence" role="status">本浏览器记住选择，同一地址刷新后保留；更换浏览器或地址后需重新选择。</p>
+    </div>
+    <div class="test-stop-help">
+      <h3>排查问题时开启，日常测试可保持关闭</h3>
+      <ul class="test-stop-explain" id="test-fail-fast-help">
+        <li><strong>建议开启：</strong>首次接入平台、更换密钥或接口、调整模型参数后，想尽快看到第一次错误时使用；适合排查密钥、接口或参数问题。</li>
+        <li><strong>开启后：</strong>检测到失败就停止后续检查；真实测试中的查询、下载错误不再自动重试。不会取消平台已经受理的任务，也不会让排队更快。</li>
+        <li><strong>建议关闭：</strong>日常验证模型能否工作、希望容忍临时网络波动时保持关闭。查询、下载遇到临时网络问题，可按默认策略重试；生成提交本身仍不会自动重发。</li>
+        <li><strong>不会中断正常等待：</strong>平台显示“排队中 / 生成中”时，仍会继续查询，直到任务结束或超时。</li>
+      </ul>
+      <p class="test-stop-billing" id="test-fail-fast-billing"><strong>这不是免费开关。</strong>免费预检不生成内容，不保证实际生成成功；预检警告不一定阻止真实生成。真实测试仍需确认并可能收费。此开关不能撤销已受理的任务；遇到受理不明，请先查任务或账单，不要直接重跑。</p>
+    </div>
   </div>
   <div id="model-list" data-page-node-id="8PHrPQ1HIUr6JH6kjKhGsq"></div>
 
@@ -1984,6 +2079,30 @@ function hideError(){
   clearTimeout(errTimer);
 }
 
+function initTestFailFastPreference(){
+  const control = el("test-fail-fast");
+  const note = el("test-fail-fast-persistence");
+  if(!control) return;
+  const key = "media-router.ui.test-fail-fast.v1";
+  const savedHint = "本浏览器记住选择，同一地址刷新后保留；更换浏览器或地址后需重新选择。";
+  const unavailableHint = "浏览器无法保存此选择；当前页面仍可使用，刷新后可能恢复为上次保存的选择，请在测试前确认。";
+  function showPersistence(ok){
+    if(note) note.textContent = ok ? savedHint : unavailableHint;
+  }
+  /* 只存一个 UI 布尔偏好，不存令牌、模型配置或测试结果。存储被禁用时不阻断页面。 */
+  control.checked = false;
+  try{
+    control.checked = localStorage.getItem(key) === "true";
+    showPersistence(true);
+  }catch(e){ showPersistence(false); }
+  control.addEventListener("change", ()=>{
+    try{
+      localStorage.setItem(key, control.checked ? "true" : "false");
+      showPersistence(true);
+    }catch(e){ showPersistence(false); }
+  });
+}
+
 document.querySelectorAll(".tab").forEach(t=>{
   t.addEventListener("click", ()=>{
     document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("on", x===t));
@@ -2169,6 +2288,7 @@ el("model-list").addEventListener("change", ev => guarded("切换模型状态", 
   await loadAll();
 }));
 
+initTestFailFastPreference();
 loadAll().catch(e=>{
   document.body.insertAdjacentHTML("afterbegin",
     '<div class="wrap"><div class="note err">加载配置失败：'+esc(e.message)+'</div></div>');
