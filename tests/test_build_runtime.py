@@ -46,6 +46,15 @@ REQUIRED = {
     "scripts/mrouter/diagnostics.py",
     "scripts/mrouter/lifecycle.py",
     "scripts/mrouter/outcomes.py",
+    "scripts/mrouter/prompts.py",
+    "references/prompts/index.md",
+    "references/prompts/image.md",
+    "references/prompts/video.md",
+    "references/prompts/library/LICENSE",
+    "references/prompts/library/SOURCES.md",
+    "references/prompts/library/manifest.json",
+    "references/prompts/library/references/docs-prompts/source-notice.md",
+    "references/prompts/library/references/docs-prompts/originals/disclaimer.md.txt",
     "references/setup.md",
     "references/providers.md",
     "assets/config.html",
@@ -67,6 +76,9 @@ FORBIDDEN_PARTS = (
     "tools/",
     "pack/",
     "dist/",
+    ".archify/",
+    "gpt-image-2-style-library/",
+    "host-generation.md",
 )
 
 print("运行时包冒烟测试")
@@ -86,6 +98,10 @@ with tempfile.TemporaryDirectory(prefix="mr-build-test-") as tmp:
 
     check((target / "SKILL.md").is_file(), "生成 SKILL.md")
     check(REQUIRED.issubset(rel), "包含全部运行时必需文件")
+    check(sorted(name for name in rel if Path(name).name == "SKILL.md") == ["SKILL.md"],
+          "只包含唯一技能入口，不嵌套注册上游技能")
+    check(not (target / "references/prompts/library/references/host-generation.md").exists(),
+          "不包含上游宿主直调指南")
     check(not any(part in name for name in rel for part in FORBIDDEN_PARTS),
           "没有 README / 测试 / 密钥 / 缓存 / outputs")
     check("scripts/selftest.py" not in rel and "scripts/selftest_web.py" not in rel,
@@ -97,6 +113,10 @@ with tempfile.TemporaryDirectory(prefix="mr-build-test-") as tmp:
         names = zf.namelist()
         check(all(n.startswith("media-router/") for n in names), "zip 内统一在 media-router/ 下")
         check("media-router/SKILL.md" in names, "zip 含 SKILL.md")
+        check({"media-router/" + name for name in REQUIRED}.issubset(names),
+              "zip 包含全部运行时资源、提示词规范与资料许可")
+        check(sorted(name for name in names if Path(name).name == "SKILL.md") == ["media-router/SKILL.md"],
+              "zip 只有一个技能入口")
         check({"media-router/scripts/mrouter/diagnostics.py", "media-router/scripts/mrouter/outcomes.py"}.issubset(names),
               "zip 包含公共诊断和验收模块")
         check(not any(part in name for name in names for part in FORBIDDEN_PARTS),
