@@ -397,7 +397,7 @@ class TemporaryLibraryTests(unittest.TestCase):
             elif isinstance(node, ast.ImportFrom):
                 self.assertEqual(node.level, 0)
                 imports.append(node.module.split(".")[0])
-        self.assertLessEqual(set(imports), {"pathlib", "typing", "hashlib", "json", "re", "collections"})
+        self.assertLessEqual(set(imports), {"pathlib", "typing", "hashlib", "json", "re", "collections", "unicodedata"})
         before = {path.relative_to(self.temporary).as_posix(): path.read_bytes()
                   for path in self.temporary.rglob("*") if path.is_file()}
         with patch.object(socket, "socket", side_effect=AssertionError("不能联网")), \
@@ -456,6 +456,246 @@ class PromptSnapshotReaderTests(unittest.TestCase):
                     self.assertEqual(list(Path(temporary).iterdir()), [])
                 finally:
                     os.chdir(old_cwd)
+
+
+class PromptSearchTests(unittest.TestCase):
+    def test_chinese_and_english_matching_with_reasons(self):
+        library = PromptLibrary()
+        result = library.search(kind="image", query="全自动咖啡机")
+        self.assertTrue(result["matched"])
+        self.assertEqual(result["cases"][0]["id"], 190)
+        self.assertTrue(result["cases"][0]["reasons"])
+        self.assertNotIn("prompt", result["cases"][0])
+        self.assertNotIn("query", result)
+        self.assertEqual(result["command"], "prompts.search")
+        self.assertEqual(result["library_version"], MANIFEST_SHA)
+        self.assertEqual(result["guide_path"], "references/prompts/image.md")
+        self.assertEqual(result["data_kind"], "reference_data")
+        self.assertEqual(result, library.search(kind="image", query="全自动咖啡机"))
+        english = library.search(kind="image", query="product", category="product")
+        self.assertTrue(english["matched"])
+        self.assertTrue(all(case["category"] == "product" for case in english["cases"]))
+        self.assertEqual(json.loads(json.dumps(result, ensure_ascii=False)), result)
+
+    def test_zero_match_common_words_and_filter_do_not_fabricate_hits(self):
+        library = PromptLibrary()
+        for query in ("zzqvunmatch971", "生成图片视频提示词帮我", "IMAGE Video Generate Prompt"):
+            for category in (None, "product"):
+                with self.subTest(query=query, category=category):
+                    result = library.search(kind="image", query=query, category=category)
+                    self.assertFalse(result["matched"])
+                    self.assertEqual((result["categories"], result["cases"]), ([], []))
+                    self.assertTrue(result["warnings"])
+        filtered = library.search(kind="image", query="全自动咖啡机", category="history")
+        self.assertFalse(filtered["matched"])
+
+    def test_duplicate_snapshot_groups_and_unpublished_cases_are_excluded(self):
+        library = PromptLibrary()
+        result = library.search(kind="image", query="关系图谱信息图", limit=5)
+        hashes = [case["prompt_sha256"] for case in result["cases"]]
+        self.assertEqual(len(hashes), len(set(hashes)))
+        self.assertTrue(any({84, 85, 86, 87}.issubset(case["duplicate_ids"]) for case in result["cases"]))
+        unpublished = library.search(kind="image", query="朋友圈截图 网页", limit=5)
+        self.assertTrue(all(case["prompt_status"] == "provided" for case in unpublished["cases"]))
+        self.assertFalse({335, 336} & {case["id"] for case in unpublished["cases"]})
+
+    def test_normalization_limits_and_deterministic_order(self):
+        library = PromptLibrary()
+        first = library.search(kind="image", query="ＰＲＯＤＵＣＴ", limit=5)
+        self.assertEqual(first, library.search(kind="image", query="product", limit=5))
+        self.assertEqual(first, library.search(kind="image", query="PrOdUcT", limit=5))
+        self.assertGreater(len(first["cases"]), 3)
+        for limit in (1, 3, 5):
+            result = library.search(kind="image", query="product", limit=limit)
+            self.assertLessEqual(len(result["categories"]), limit)
+            self.assertEqual(result["cases"], first["cases"][:limit])
+        self.assertEqual(library.search(kind="image", query="product")["cases"], first["cases"][:3])
+        for key, tie in (("cases", "id"), ("categories", "category")):
+            self.assertEqual(first[key], sorted(first[key], key=lambda item: (-item["score"], item[tie])))
+            for item in first[key]:
+                self.assertGreater(item["score"], 0)
+                self.assertEqual(item["score"], sum(reason["weight"] * len(reason["terms"]) for reason in item["reasons"]))
+                for reason in item["reasons"]:
+                    self.assertEqual(reason["terms"], sorted(set(reason["terms"])))
+
+    def test_video_adds_only_visual_scope_and_guidance_not_search_bias(self):
+        library = PromptLibrary()
+        image = library.search(kind="image", query="场景 叙事", limit=5)
+        video = library.search(kind="video", query="场景 叙事", limit=5)
+        self.assertEqual(video["guide_path"], "references/prompts/video.md")
+        self.assertTrue(any("视频" in warning for warning in video["warnings"]))
+        self.assertEqual(image["categories"], video["categories"])
+        self.assertEqual(image["cases"], video["cases"])
+        self.assertTrue(all(item["reference_scope"] == "image_visual" for item in video["categories"] + video["cases"]))
+        empty = library.search(kind="video", query="zzqvunmatch971")
+        self.assertFalse(empty["matched"])
+        self.assertEqual((empty["categories"], empty["cases"]), ([], []))
+
+    def test_parameter_types_bounds_and_unknown_categories(self):
+        library = PromptLibrary()
+        options = [{"kind": value, "query": "x"} for value in ("audio", "IMAGE", None, [], {})]
+        options += [{"kind": "image", "query": value} for value in (None, [], 1, "", " \t\r\n")]
+        options += [{"kind": "image", "query": "x", "limit": value} for value in (0, 6, True, 3.0, "3", None)]
+        for option in options:
+            with self.subTest(options=option), self.assertRaises(ValueError):
+                library.search(**option)
+        for category in ("unknown", "../product", [], {}, False):
+            with self.subTest(category=category), self.assertRaises(PromptLibraryError) as caught:
+                library.search(kind="image", query="x", category=category)
+            self.assertEqual(caught.exception.code, "category_not_found")
+
+    def test_search_reads_only_catalog_metadata_in_requested_scope(self):
+        library = PromptLibrary()
+        read = library._read
+        seen = []
+
+        def observe(relative):
+            seen.append(relative)
+            self.assertNotIn("/cases/", relative)
+            self.assertNotIn("/docs-prompts/", relative)
+            self.assertNotIn("/templates/", relative)
+            return read(relative)
+
+        with patch.object(library, "_read", side_effect=observe):
+            library.search(kind="image", query="商品", category="product")
+            self.assertEqual(seen, ["references/catalogs/product.md"])
+            seen.clear()
+            library.search(kind="image", query="zzqvunmatch971")
+        self.assertEqual(set(seen), {entry["catalog"] for entry in library.categories.values()})
+        self.assertEqual(len(seen), 13)
+
+
+class TemporarySearchTests(unittest.TestCase):
+    put = TemporaryLibraryTests.put
+    save = TemporaryLibraryTests.save
+    assert_library_error = TemporaryLibraryTests.assert_library_error
+
+    def setUp(self):
+        TemporaryLibraryTests.setUp(self)
+        self.data["categories"][0].update(label="Alpha alpha", keywords="metal metal studio")
+        self.data["categories"][1].update(label="Beta", keywords="metal")
+        self.tags = {1: ("metal metal", "studio metal"), 2: ("metal", "studio"),
+                     3: ("private", "hidden"), 4: ("metal studio", "studio")}
+        for case, title in zip(self.data["cases"], ("Alpha | Device device", "Alpha Beta", "Unpublishedneedle", "Alpha")):
+            case["title"] = title
+        self.save_catalogs()
+        self.save()
+
+    def save_catalogs(self):
+        for category in self.data["categories"]:
+            rows = ["| 案例 | 标题 | 风格 | 场景 | 资料状态 | 完整案例行范围 |",
+                    "| --- | --- | --- | --- | --- | --- |"]
+            for case in self.data["cases"]:
+                if case["catalog"] != category["catalog"]:
+                    continue
+                style, scene = self.tags[case["id"]]
+                title = case["title"].replace("|", r"\|")
+                rows.append("| [%d](<../cases/%s.md#case-%d>) | %s | %s | %s | %s | %d–%d |" % (
+                    case["id"], category["slug"], case["id"], title, style, scene,
+                    case["quality"], case["startLine"], case["endLine"]))
+            self.put(category["catalog"], ("\n".join(rows) + "\n").encode("utf-8"))
+
+    def test_exact_group_weights_and_unique_terms_with_escaped_pipe_title(self):
+        result = PromptLibrary(self.root).search(kind="image", query="alpha device metal studio", limit=5)
+        self.assertEqual([(case["id"], case["score"]) for case in result["cases"]], [(1, 24), (4, 16)])
+        self.assertEqual([(item["category"], item["score"]) for item in result["categories"]], [("ui", 10), ("product", 2)])
+        self.assertEqual(result["cases"][0]["reasons"], [
+            {"field": "title", "weight": 6, "terms": ["alpha", "device"]},
+            {"field": "tags", "weight": 4, "terms": ["metal", "studio"]},
+            {"field": "keywords", "weight": 2, "terms": ["metal", "studio"]},
+        ])
+        self.assertEqual(result["cases"][0]["title"], "Alpha | Device device")
+        self.assertEqual(result["cases"][0]["duplicate_ids"], [1, 2])
+        self.assertEqual(result["cases"][1]["materials_status"], "required")
+        self.assertEqual(result["cases"][0]["materials_status"], "unknown")
+
+    def test_duplicate_representative_highest_score_then_lowest_id(self):
+        library = PromptLibrary(self.root)
+        beta = library.search(kind="image", query="beta", limit=5)
+        self.assertEqual([case["id"] for case in beta["cases"]], [2])
+        self.assertEqual(beta["cases"][0]["duplicate_ids"], [1, 2])
+        alpha = library.search(kind="image", query="alpha", limit=5)
+        self.assertEqual([case["id"] for case in alpha["cases"]], [1, 4])
+        self.assertEqual([case["score"] for case in alpha["cases"]], [6, 6])
+        self.assertEqual(library.search(kind="image", query="alpha", category="product")["cases"][0]["id"], 4)
+
+    def test_category_ties_sort_by_slug_and_can_match_without_cases(self):
+        for category in self.data["categories"]:
+            category.update(label="Needle", keywords="nothing")
+        self.save()
+        result = PromptLibrary(self.root).search(kind="image", query="needle", limit=5)
+        self.assertTrue(result["matched"])
+        self.assertEqual(result["cases"], [])
+        self.assertEqual([item["category"] for item in result["categories"]], ["product", "ui"])
+        self.assertEqual([item["score"] for item in result["categories"]], [6, 6])
+        self.assertFalse(PromptLibrary(self.root).search(kind="image", query="unpublishedneedle")["matched"])
+
+    def test_english_whole_words_common_removal_and_cjk_bigrams(self):
+        self.data["cases"][0]["title"] = "Imagination prompted promptness imageable Ｄｅｖｉｃｅ 全自动咖啡机"
+        self.save_catalogs()
+        self.save()
+        library = PromptLibrary(self.root)
+        for query in ("Imagination", "prompted", "promptness", "imageable", "咖啡", "咖啡机", "DEVICE", "生成图片帮我咖啡机"):
+            with self.subTest(query=query):
+                self.assertEqual(library.search(kind="image", query=query)["cases"][0]["id"], 1)
+        for query in ("magination", "ice", "dev", "rompted", "generate prompt image video"):
+            with self.subTest(query=query):
+                self.assertFalse(library.search(kind="image", query=query)["matched"])
+
+    def test_invalid_catalog_rows_are_corrupt_even_for_zero_query(self):
+        relative = "references/catalogs/ui.md"
+        original = (self.root / relative).read_text(encoding="utf-8")
+        lines = original.splitlines()
+        row = lines[2]
+        corrupt_rows = (
+            row.replace("[1]", "[999]", 1), row.replace("[1]", "[2]", 1),
+            row.replace("#case-1", "#case-999", 1), row.replace("../cases/ui.md", "../cases/product.md", 1),
+            row.replace("../cases/ui.md", "https://example.invalid/case", 1),
+            row.replace("../cases/ui.md", "../../../outside.md", 1),
+            row.replace("Alpha", "Changed", 1), row.rsplit("|", 2)[0] + "| 0–0 |",
+            row.replace("| metal metal |", "| metal | extra |", 1),
+        )
+        for damaged in corrupt_rows:
+            self.put(relative, original.replace(row, damaged, 1).encode("utf-8"))
+            with self.subTest(damaged=damaged):
+                self.assert_library_error("library_corrupt", lambda: PromptLibrary(self.root).search(
+                    kind="image", query="private-query-zzqvunmatch971", category="ui"))
+        for text in ("missing rows", "\n".join(lines[:2] + lines[3:]), original + row + "\n"):
+            self.put(relative, text.encode("utf-8"))
+            self.assert_library_error("library_corrupt", lambda: PromptLibrary(self.root).search(kind="image", query="x", category="ui"))
+
+    def test_missing_unreadable_bad_utf8_catalogs_do_not_become_empty(self):
+        library = PromptLibrary(self.root)
+        target = self.root / "references/catalogs/ui.md"
+        read = Path.read_bytes
+        for failure in (FileNotFoundError("private-internal-detail"), PermissionError("private-internal-detail")):
+            def broken(path):
+                if path == target:
+                    raise failure
+                return read(path)
+            with self.subTest(error=type(failure).__name__), patch.object(Path, "read_bytes", broken):
+                error = self.assert_library_error("library_corrupt", lambda: library.search(
+                    kind="image", query="private-query-zzqvunmatch971", category="ui"))
+                self.assertNotIn("private-query", str(error))
+        self.put("references/catalogs/ui.md", b"\xff")
+        self.assert_library_error("library_corrupt", lambda: library.search(kind="image", query="x", category="ui"))
+
+    def test_search_no_network_no_execution_no_state_and_no_query_echo(self):
+        before = {path.relative_to(self.temporary).as_posix(): path.read_bytes()
+                  for path in self.temporary.rglob("*") if path.is_file()}
+        with patch.object(socket, "socket", side_effect=AssertionError("不能联网")), \
+                patch.object(socket, "create_connection", side_effect=AssertionError("不能联网")), \
+                patch.object(os, "system", side_effect=AssertionError("不能执行参考内容")):
+            library = PromptLibrary(self.root)
+            result = library.search(kind="image", query="device private-query-marker")
+            empty = library.search(kind="video", query="private-query-marker")
+        for payload in (result, empty):
+            self.assertNotIn("private-query-marker", json.dumps(payload, ensure_ascii=False))
+            self.assertNotIn("query", payload)
+            self.assertTrue(all("prompt" not in case and "goal_description" not in case for case in payload["cases"]))
+        after = {path.relative_to(self.temporary).as_posix(): path.read_bytes()
+                 for path in self.temporary.rglob("*") if path.is_file()}
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":
