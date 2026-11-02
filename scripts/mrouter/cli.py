@@ -9,6 +9,7 @@
   list       看模型池
   resolve    只看路由结果（不真调用，用来排查"会选谁"）
   generate   真正执行生成
+  prompts    离线检索／查看图片、视频提示词参考
   report     手工上报某个模型的成败（用于外部调用后回写健康度）
   health     看/清健康度
   web        打开本机网页配置界面（配置 + 连通性检测都在这里）
@@ -790,6 +791,35 @@ def cmd_health(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_prompts(args: argparse.Namespace) -> int:
+    """只读随包参考资料；成功正文不经过厂商错误文本打码。"""
+    from .prompts import PromptLibrary, PromptLibraryError
+
+    try:
+        library = PromptLibrary()
+        if args.prompt_command == "search":
+            payload = library.search(
+                kind=args.kind, query=args.query, category=args.category, limit=args.limit
+            )
+        else:
+            payload = library.show(case_id=args.case_id, category=args.category)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from None
+    except PromptLibraryError as exc:
+        _emit(
+            {"status": "error", "kind": "prompt_library", "code": exc.code, "error": str(exc)},
+            getattr(args, "pretty", False),
+        )
+        return EXIT_ERROR
+
+    # 仅输出已审查的随包参考数据；不读取用户配置、凭据或媒体文件。
+    print(
+        json.dumps(payload, ensure_ascii=False, indent=2 if getattr(args, "pretty", False) else None),
+        flush=True,
+    )
+    return EXIT_OK
+
+
 def cmd_web(args: argparse.Namespace) -> int:
     """启动本机网页配置界面。"""
     from . import webserver
@@ -808,6 +838,7 @@ GUIDE: list[tuple[str, str]] = [
     ("list", "看模型池：优先级、权重、Key 是否就绪、有没有被熔断"),
     ("resolve", "只看会选谁，不真调用（排查首选/降级序列）"),
     ("generate", "执行生成"),
+    ("prompts", "离线检索／查看提示词参考，不调用模型"),
     ("providers", "看内置支持哪些平台"),
     ("report", "回写某个模型的成败（外部调用后同步健康度）"),
     ("health", "看/清熔断状态"),
@@ -818,6 +849,7 @@ GUIDE_EXAMPLES: list[tuple[str, str]] = [
     ("python scripts/media_router.py list --pretty", "看模型池现状"),
     ("python scripts/media_router.py generate --kind image --prompt \"一只戴圆框眼镜的橘猫\"", "生成一张图"),
     ("python scripts/media_router.py resolve --kind video --pretty", "只看视频会选哪个模型"),
+    ('python scripts/media_router.py prompts search --kind image --query "商品 极简"', "检索图片提示词参考"),
 ]
 
 
@@ -959,6 +991,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_web.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     p_web.set_defaults(func=cmd_web)
+
+    # 新增嵌套命令只补 pretty 的显式值，不能覆盖前一层已经解析的 True。
+    prompt_common = _JsonArgumentParser(add_help=False)
+    prompt_common.add_argument(
+        "--pretty", action="store_true", default=argparse.SUPPRESS, help="JSON 缩进输出"
+    )
+    p_prompts = sub.add_parser(
+        "prompts", parents=[prompt_common], help="只读检索图片／视频提示词参考"
+    )
+    prompt_sub = p_prompts.add_subparsers(dest="prompt_command", required=True)
+
+    def prompt_query(text: str) -> str:
+        if not text.strip():
+            raise argparse.ArgumentTypeError("--query 不能为空")
+        return text
+
+    p_search = prompt_sub.add_parser(
+        "search", parents=[prompt_common], help="搜索分类与案例，不调用模型"
+    )
+    p_search.add_argument("--kind", required=True, choices=["image", "video"])
+    p_search.add_argument("--query", required=True, type=prompt_query)
+    p_search.add_argument("--category")
+    p_search.add_argument("--limit", type=int, choices=range(1, 6), default=3)
+    p_search.set_defaults(func=cmd_prompts)
+
+    p_show = prompt_sub.add_parser(
+        "show", parents=[prompt_common], help="查看一个分类模板或案例"
+    )
+    selector = p_show.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--id", type=int, dest="case_id")
+    selector.add_argument("--category")
+    p_show.set_defaults(func=cmd_prompts)
 
     return parser
 
