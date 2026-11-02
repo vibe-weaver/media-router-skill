@@ -36,12 +36,12 @@ def _tokens(text: str, remove_common: bool = False):
     text = unicodedata.normalize("NFKC", text).casefold()
     if remove_common:
         for word in STOP_WORDS:
-            if word.isascii():
-                text = re.sub(r"\b" + re.escape(word) + r"\b", " ", text)
-            else:
+            if not word.isascii():
                 text = text.replace(word, " ")
     tokens = set()
     for part in re.findall(r"[a-z0-9][a-z0-9_+-]*|[\u3400-\u9fff]+", text):
+        if remove_common and part in STOP_WORDS:
+            continue
         tokens.add(part)
         if re.fullmatch(r"[\u3400-\u9fff]+", part) and len(part) > 2:
             tokens.update(part[index:index + 2] for index in range(len(part) - 1))

@@ -489,6 +489,34 @@ class PromptSearchTests(unittest.TestCase):
         filtered = library.search(kind="image", query="全自动咖啡机", category="history")
         self.assertFalse(filtered["matched"])
 
+    def test_ascii_stopwords_next_to_cjk_do_not_create_false_matches(self):
+        library = PromptLibrary()
+        for kind in ("image", "video"):
+            expected = library.search(kind=kind, query="黑洞")
+            self.assertFalse(expected["matched"])
+            for word in ("prompt", "image", "video", "generate", "ＰＲＯＭＰＴ"):
+                for query in (word + "黑洞", "黑洞" + word):
+                    with self.subTest(kind=kind, query=query):
+                        self.assertEqual(prompts._tokens(query, remove_common=True), {"黑洞"})
+                        self.assertEqual(library.search(kind=kind, query=query), expected)
+
+    def test_ascii_stopwords_next_to_cjk_do_not_change_scores_or_ranking(self):
+        library = PromptLibrary()
+        for kind in ("image", "video"):
+            expected = library.search(kind=kind, query="中文海报", limit=5)
+            self.assertTrue(expected["matched"])
+            for word in ("prompt", "image", "video", "generate", "ＰＲＯＭＰＴ"):
+                for query in (word + "中文海报", "中文海报" + word):
+                    with self.subTest(kind=kind, query=query):
+                        self.assertEqual(library.search(kind=kind, query=query, limit=5), expected)
+
+    def test_stopword_filter_keeps_larger_ascii_tokens_and_reference_terms(self):
+        words = {"prompted", "promptness", "imageable", "video2", "generate2",
+                 "prompt_guide", "image-maker", "prompt+style"}
+        self.assertEqual(prompts._tokens(" ".join(sorted(words)) + "黑洞", remove_common=True),
+                         words | {"黑洞"})
+        self.assertEqual(prompts._tokens("prompt中文", remove_common=False), {"prompt", "中文"})
+
     def test_duplicate_snapshot_groups_and_unpublished_cases_are_excluded(self):
         library = PromptLibrary()
         result = library.search(kind="image", query="关系图谱信息图", limit=5)
