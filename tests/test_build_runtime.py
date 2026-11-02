@@ -5,6 +5,8 @@
 """
 
 import importlib.util
+import os
+import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
@@ -41,6 +43,9 @@ REQUIRED = {
     "scripts/media_router.py",
     "scripts/mrouter/config.py",
     "scripts/mrouter/cli.py",
+    "scripts/mrouter/diagnostics.py",
+    "scripts/mrouter/lifecycle.py",
+    "scripts/mrouter/outcomes.py",
     "references/setup.md",
     "references/providers.md",
     "assets/config.html",
@@ -92,6 +97,8 @@ with tempfile.TemporaryDirectory(prefix="mr-build-test-") as tmp:
         names = zf.namelist()
         check(all(n.startswith("media-router/") for n in names), "zip 内统一在 media-router/ 下")
         check("media-router/SKILL.md" in names, "zip 含 SKILL.md")
+        check({"media-router/scripts/mrouter/diagnostics.py", "media-router/scripts/mrouter/outcomes.py"}.issubset(names),
+              "zip 包含公共诊断和验收模块")
         check(not any(part in name for name in names for part in FORBIDDEN_PARTS),
               "zip 内没有开发/密钥文件")
         check("快速路径" in zf.read("media-router/SKILL.md").decode("utf-8"),
@@ -106,7 +113,22 @@ with tempfile.TemporaryDirectory(prefix="mr-build-test-") as tmp:
     check("config/secrets.web.yaml" in ignore_text and "config/secrets.yaml" in ignore_text,
           ".gitignore 覆盖了明文密钥文件")
     check("config/models.web.yaml" in ignore_text, ".gitignore 覆盖了页面写出的本机配置")
+    rules = {
+        "config/secrets.yaml", "config/secrets.web.yaml", "config/models.web.yaml",
+        "__pycache__/", "*.py[cod]", "state/", "outputs/", "dist/",
+    }
+    check(rules.issubset(set(ignore_text.splitlines())), "忽略规则覆盖本机配置、缓存和生成文件")
     check("media-router/.gitignore" in names, "zip 里带 .gitignore（装完也能防误提交）")
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(target / "scripts")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["MEDIA_ROUTER_CONFIG_DIR"] = str(Path(tmp) / "empty-config")
+    imported = subprocess.run(
+        [sys.executable, "-B", "-c", "from mrouter import cli, diagnostics, outcomes"],
+        cwd=tmp, env=env, timeout=30,
+    )
+    check(imported.returncode == 0, "隔离进程只从运行时包成功导入 CLI/诊断/验收模块")
 
 print(f"\n通过 {passed} 项，失败 {failed} 项")
 sys.exit(1 if failed else 0)

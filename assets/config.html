@@ -594,6 +594,10 @@ details.pathbar .paths{
     <div id="prob-summary" data-page-node-id="SYvV2jyl43sSDY3y7uvpB8"></div>
   </div>
 
+  <div class="note" style="margin-top:12px">
+    <label><input type="checkbox" id="test-fail-fast"> 首次失败即停（仅本次测试，不保存到模型配置）</label>
+    <div class="hint">开启后不自动重试；正常任务等待仍会轮询。免费预检只检查可达性、密钥和能确认的模型信息，不保证实际生成成功；真实测试需要确认并消耗额度。</div>
+  </div>
   <div id="model-list" data-page-node-id="8PHrPQ1HIUr6JH6kjKhGsq"></div>
 
   <div class="card" id="model-form" style="display:none; margin-top:14px" data-page-node-id="nhcSm2CRWmWsLFMMJMJ1DA">
@@ -1305,9 +1309,8 @@ function renderModelCard(m, info){
     ? '<div class="hint" style="margin-top:2px">不调接口、不花钱、不出图；'+
       '只在真实模型都不可用时，把请求交给 AI 助手的内置工具。不能编辑，只能隐藏。</div>'
     : '';
-  /* 语音模型暂时没有「测试」：连通性探测是按图像/视频的只读端点设计的，
-     拿它测 TTS 只会给出误导性的结论，等适配器接好再放开。 */
-  const canTest = !native && m.kind !== "audio";
+  /* 图像、视频、语音共用只读预检和需确认的真实测试；内置工具不在此生成。 */
+  const canTest = !native;
   const actions = native
     ? '<button class="sm" data-act="hide-model" data-mid="'+esc(m.id)+'">'+
         (m.enabled?'隐藏':'恢复显示')+'</button>'
@@ -1381,6 +1384,12 @@ function renderModels(){
       html += natives.map(m=>renderModelCard(m, info)).join("");
     }
     box.innerHTML = html;
+  });
+  document.querySelectorAll('button[data-mid]').forEach(btn=>{
+    if(btn.dataset.act !== "test-model") return;
+    const mid = String(btn.dataset.mid);
+    setModelTestBusy(mid, modelTestsPending.has(mid));
+    mountModelTestResult(mid);
   });
   updateKindCounts();
 }
@@ -1800,7 +1809,46 @@ async function saveModel(){
 /* box 既可以是元素，也可以是一个返回元素的函数。
    传函数时会在**确认之后**才创建结果区 —— 真实测试要先问一句"要花额度"，
    提前建盒子的话，用户点取消会留下一张空卡片，还会把上一次的测试结果顶掉。 */
+const modelTestsPending = new Set();
+const modelTestResults = new Map();
+function modelTestItem(mid){
+  let item = null;
+  document.querySelectorAll('button[data-mid]').forEach(btn=>{
+    if(btn.dataset.mid === mid && btn.dataset.act === "test-model") item = btn.closest(".mitem");
+  });
+  return item;
+}
+function mountModelTestResult(mid, fallbackBox){
+  const saved = modelTestResults.get(mid);
+  if(!saved) return;
+  const item = modelTestItem(mid);
+  let box = fallbackBox;
+  if(item){
+    const next = item.nextElementSibling;
+    box = next && next.dataset && next.dataset.mrResult === "model:"+mid
+      ? next : resultBoxAfter(item, "model:"+mid);
+  }
+  if(box) box.innerHTML = saved.html;
+}
+function setModelTestResult(mid, html, fallbackBox){
+  /* 只保存本页内已安全渲染的结果，不落 localStorage 或服务器历史。 */
+  modelTestResults.set(mid, {html:html});
+  mountModelTestResult(mid, fallbackBox);
+}
+function setModelTestBusy(mid, busy){
+  document.querySelectorAll('button[data-mid]').forEach(btn=>{
+    if(btn.dataset.mid === mid && (btn.dataset.act === "test-model" || btn.dataset.act === "real-test-model")){
+      btn.disabled = busy;
+    }
+  });
+}
 async function testModel(box, payload, deep){
+  const mid = String(payload.id || "");
+  if(modelTestsPending.has(mid)) return;
+  modelTestsPending.add(mid);
+  setModelTestBusy(mid, true);
+  const failFast = !!(el("test-fail-fast") && el("test-fail-fast").checked);
+  try{
   /* 两种模式：
      轻量（默认）—— 只读预检，不花钱；
      真实（deep）—— 真生成一次，验证提交→推理→下载→落盘全链路，消耗额度。 */
@@ -1812,13 +1860,15 @@ async function testModel(box, payload, deep){
     );
     if(!ok) return;
   }
-  if(typeof box === "function") box = box();
-  box.innerHTML = '<div class="note"><span class="spin"></span>'+
+  const item = modelTestItem(mid);
+  if(item) box = resultBoxAfter(item, "model:"+mid);
+  else if(typeof box === "function") box = box();
+  setModelTestResult(mid, '<div class="note"><span class="spin"></span>'+
     (deep ? "正在真实生成一次（会消耗额度，请稍等）…"
-          : "正在测试…（不会生成任何内容，不消耗额度）")+'</div>';
+          : "正在测试…（不会生成任何内容，不消耗额度）")+'</div>', box);
   try{
     const res = await api("/api/model/test", {
-      method:"POST", body:JSON.stringify(Object.assign({}, payload, {deep: !!deep}))
+      method:"POST", body:JSON.stringify(Object.assign({}, payload, {deep: !!deep, fail_fast: failFast}))
     });
     if(deep){
       let html = "";
@@ -1828,37 +1878,66 @@ async function testModel(box, payload, deep){
       }
       const real = res.real_call || {};
       if(real.ok){
-        html += '<div class="note"><span class="badge ok">真实测试通过</span> '+
-          '这个模型确实可用，全链路已跑通。</div>';
+        html += '<div class="note"><span class="badge ok">本次生成成功</span> '+
+          '本次提交、推理与取回产物成功；不代表规格、画面或听感均已验收。</div>';
       }else{
         html += '<div class="note err"><span class="badge err">真实测试失败</span> '+
           esc(real.error || res.error || "")+'</div>';
       }
+      if(real.diagnostic){
+        const d = real.diagnostic;
+        html += '<div class="note err">'+esc(d.summary || "诊断")+
+          (d.detail ? '<br>厂商原文：'+esc(d.detail) : '')+'</div>';
+      }
+      if(real.elapsed_ms !== undefined) html += '<div class="hint">生成阶段耗时：'+esc(real.elapsed_ms)+' ms</div>';
+      if(res.elapsed_ms !== undefined) html += '<div class="hint">总耗时（含预检）：'+esc(res.elapsed_ms)+' ms</div>';
+      if(real.assessment){
+        const status = real.assessment.status;
+        html += '<div class="note '+(status === "mismatch" ? "err" : "")+'">需求核验：'+
+          esc(status === "mismatch" ? "发现规格差异" : status === "checked" ? "已核对可读元数据，内容和听感仍需人工验收" : "尚有未核验项")+'</div>';
+      }
+      (real.notes || []).forEach(note=>{ html += '<div class="hint">'+esc(note)+'</div>'; });
+      (real.profiles || []).forEach(profile=>{
+        const parts = [profile.format, profile.size_human || (profile.bytes === undefined ? "" : profile.bytes+" B")];
+        if(profile.width && profile.height) parts.push(profile.width+"×"+profile.height);
+        if(profile.duration_seconds !== undefined) parts.push(profile.duration_seconds+" 秒");
+        html += '<div class="hint mono">'+esc(parts.filter(Boolean).join(" · "))+'</div>';
+      });
       if(real.hint) html += '<div class="hint">'+esc(real.hint)+'</div>';
       if(real.note) html += '<div class="hint">'+esc(real.note)+'</div>';
-      if(real.files && real.files.length){
-        const f = real.files[0];
-        html += '<div class="hint mono" style="margin-top:8px">'+esc(f)+'</div>';
+      (real.files || []).forEach(f=>{
+        const source = esc('/api/file?path='+encodeURIComponent(f));
+        html += '<div class="hint mono" style="margin-top:8px"><a href="'+source+'" target="_blank" rel="noopener noreferrer">'+esc(f)+'</a></div>';
         const low = String(f).toLowerCase();
         if(/\.(png|jpe?g|webp|gif)$/.test(low)){
-          html += '<img class="preview" src="/api/file?path='+encodeURIComponent(f)+
-            '" alt="真实测试产物">';
+          html += '<img class="preview" src="'+source+'" alt="真实测试产物">';
         }else if(/\.(mp4|webm)$/.test(low)){
-          html += '<video class="preview" controls src="/api/file?path='+encodeURIComponent(f)+
-            '"></video>';
+          html += '<video class="preview" controls src="'+source+'"></video>';
         }else if(/\.(wav|mp3|m4a|ogg|flac)$/.test(low)){
-          /* 语音接通后，真实测试的产物也在这里回显。没有这一支的话，
-             用户只看到一行 wav 路径，听不到效果，等于没测。 */
-          html += '<audio class="preview" controls style="width:100%" src="/api/file?path='+
-            encodeURIComponent(f)+'"></audio>';
+          html += '<audio class="preview" controls style="width:100%" src="'+source+'"></audio>';
         }
-      }
-      box.innerHTML = html;
+      });
+      (real.urls || []).forEach(url=>{
+        /* 远程 URL 仅作取回信息显示，避免把不受信任的 scheme 注入可点击链接。 */
+        html += '<div class="hint mono">产物 URL：'+esc(url)+'</div>';
+      });
+      (real.tasks || []).forEach(task=>{
+        html += '<div class="hint mono">平台任务：'+esc(task.task_id || '')+
+          (task.status ? ' · '+esc(task.status) : '')+
+          (task.query_url ? '<br>查询地址：'+esc(task.query_url) : '')+'</div>';
+      });
+      setModelTestResult(mid, html, box);
     }else{
-      renderChecks(box, res);
+      const rendered = document.createElement("div");
+      renderChecks(rendered, res);
+      setModelTestResult(mid, rendered.innerHTML, box);
     }
   }catch(e){
-    box.innerHTML = '<div class="note err">测试失败：'+esc(e.message)+'</div>';
+    setModelTestResult(mid, '<div class="note err">测试失败：'+esc(e.message)+'</div>', box);
+  }
+  }finally{
+    modelTestsPending.delete(mid);
+    setModelTestBusy(mid, false);
   }
 }
 

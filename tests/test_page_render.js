@@ -152,8 +152,9 @@ ok((out.audio || "").includes("输入") && (out.audio || "").includes("文本"),
 ok(!(out.audio || "").includes(">入 "), "模态标签不再用单字「入」");
 ok((out.image || "").includes("输入") && (out.image || "").includes("输出"),
    "图像模型卡也用「输入 / 输出」全称");
-// 语音类目还没有适配器：卡片不提供「测试」，避免给出误导性的探测结论
-ok(!(out.audio || "").includes('data-act="test-model"'), "语音模型卡没有「测试」按钮");
+// 语音后端已支持预检和真实生成，卡片应提供两个入口。
+ok((out.audio || "").includes('data-act="test-model"'), "语音模型卡有「测试连通性」按钮");
+ok((out.audio || "").includes('data-act="real-test-model"'), "语音模型卡有「真实测试」按钮");
 ok((out.image.match(/data-act="test-model"/g) || []).length >= 1, "图像模型卡仍有「测试」按钮");
 
 // 2. 缺 Key / 熔断

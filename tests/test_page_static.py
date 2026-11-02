@@ -101,6 +101,9 @@ check('id="btn-test-model"' not in PAGE and 'id="btn-real-test-model"' not in PA
 check('data-act="test-model"' in PAGE and 'data-act="real-test-model"' in PAGE,
       "卡片的操作区提供「测试连通性」和「真实测试」")
 check('class="actions-row"' in PAGE, "卡片按钮收在独立容器里（窄屏整体换行）")
+check('id="test-fail-fast"' in PAGE and 'fail_fast:' in PAGE, "测试可选择临时首次失败即停策略")
+check('不保证实际生成成功' in PAGE, "免费预检如实说明验证边界")
+check('const modelTestsPending = new Set()' in PAGE, "同模型测试共享处理中锁")
 check("\naudio:" in CONFIG or CONFIG.startswith("audio:"), "models.yaml 有语音模型池")
 
 # P2 文案与计数

@@ -9,7 +9,7 @@
 
 深度级（真跑一次生成，会消耗额度）
   用极小参数真调一次适配器，顺带验证参数、下载、落盘整条链路。
-  这是唯一能 100% 确认"这个模型名真的能用"的办法。
+  成功只证明本次调用，不能替代规格、内容、画面或听感验收。
 
 设计取舍：轻量级**绝不**用"提交一个空任务看报错"这种取巧手段来判密钥 ——
 万一平台把空提示词当合法输入，用户就白花钱了。拿不到只读校验端点的平台
@@ -18,13 +18,17 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from . import catalog, config
-from .adapters import GenRequest, Ctx, kling_jwt, run_adapter
+from .adapters import DownloadError, GenRequest, Ctx, kling_jwt, run_adapter
 from .config import ModelSpec, RouterConfig, Vendor
-from .transport import HttpError, request
+from .transport import HttpError, execution_policy, is_fail_fast, redact, request
+from .diagnostics import diagnose_error
+from .caption import profile_files
+from .outcomes import assess_result
 
 PROBE_TIMEOUT = 25.0
 
@@ -72,6 +76,7 @@ class ProbeResult:
     summary: str = ""
     models: list[str] = field(default_factory=list)
     can_verify_key: bool = False
+    elapsed_ms: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +85,7 @@ class ProbeResult:
             "checks": [c.to_dict() for c in self.checks],
             "models": self.models,
             "can_verify_key": self.can_verify_key,
+            "elapsed_ms": self.elapsed_ms,
         }
 
 
@@ -275,8 +281,12 @@ def _check_auth(
                 ),
                 [],
             )
+        diagnostic = diagnose_error(exc)
+        if diagnostic["kind"] == "config":
+            detail = "；".join(filter(None, (diagnostic["summary"], diagnostic["detail"], diagnostic["hint"])))
+            return Check("密钥校验", FAIL, redact(detail + where)), []
         if status == 429:
-            return Check("密钥校验", WARN, f"密钥看起来有效，但当前被限流（HTTP 429）{where}"), []
+            return Check("密钥校验", WARN, f"校验请求被限流，未能确认密钥（HTTP 429）{where}"), []
         if status:
             return Check("密钥校验", WARN, f"校验请求返回 HTTP {status}，未能确认密钥{where}"), []
         return Check("密钥校验", FAIL, f"校验请求失败：{exc}{where}"), []
@@ -327,6 +337,21 @@ def _summarize(checks: list[Check]) -> tuple[bool, str]:
 
 
 def probe_target(
+    cfg: RouterConfig, target: ProbeTarget, kind: str = "image", model_name: str = "",
+    *, fail_fast: bool = False,
+) -> ProbeResult:
+    """只读预检不能替代真实生成；继承调用方的严格策略。"""
+    started = time.monotonic()
+    with execution_policy(fail_fast=fail_fast):
+        result = _probe_target(cfg, target, kind, model_name)
+    result.elapsed_ms = int((time.monotonic() - started) * 1000)
+    result.summary = redact(result.summary)
+    for check in result.checks:
+        check.detail = redact(check.detail)
+    return result
+
+
+def _probe_target(
     cfg: RouterConfig, target: ProbeTarget, kind: str = "image", model_name: str = ""
 ) -> ProbeResult:
     """轻量探测：不生成任何内容，不消耗额度。"""
@@ -363,6 +388,10 @@ def probe_target(
         )
     else:
         checks.append(_check_reachable(probe_url, PROBE_TIMEOUT))
+
+    if is_fail_fast() and any(check.status == FAIL for check in checks):
+        ok, summary = _summarize(checks)
+        return ProbeResult(ok=ok, checks=checks, summary=summary, can_verify_key=bool(entry.auth_check))
 
     auth_check, models = _check_auth(
         target, entry, key, PROBE_TIMEOUT, url=auth_url, url_note=auth_note
@@ -403,6 +432,42 @@ def probe_target(
 # ---------------------------------------------------------------- 深度探测
 
 
+def _recovery_fields(exc: Exception) -> dict[str, Any]:
+    """只接受停止生成错误的约定字段；产物 URL 保留取回语义，任务和提示脱敏。"""
+    if not (isinstance(exc, DownloadError) or getattr(exc, "stop_generation", False) is True):
+        return {}
+
+    def safe(value: Any) -> Any:
+        if isinstance(value, str):
+            return redact(value)
+        if isinstance(value, dict):
+            return {redact(str(key)): safe(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [safe(item) for item in value]
+        return value if value is None or isinstance(value, (bool, int, float)) else None
+
+    fields: dict[str, Any] = {"stop_generation": True}
+    for name in ("files", "urls"):
+        values = getattr(exc, name, None)
+        if isinstance(values, list):
+            fields[name] = [value for value in values if isinstance(value, str)]
+    tasks = getattr(exc, "tasks", None)
+    if isinstance(tasks, list):
+        fields["tasks"] = [safe(task) for task in tasks if isinstance(task, dict)]
+    phase = getattr(exc, "phase", None)
+    if isinstance(phase, str):
+        fields["phase"] = redact(phase)
+    elif isinstance(exc, DownloadError):
+        fields["phase"] = "delivery"
+    uncertain = getattr(exc, "submission_uncertain", False)
+    fields["submission_uncertain"] = uncertain is True
+    hint = getattr(exc, "hint", "")
+    fields["hint"] = redact(hint) if isinstance(hint, str) and hint.strip() else (
+        "不要再次生成或切换模型重跑，以免重复计费；请先核对平台任务，使用已有 files 或下载 urls 取回产物。"
+    )
+    return fields
+
+
 def deep_probe(
     cfg: RouterConfig,
     spec: ModelSpec,
@@ -411,11 +476,37 @@ def deep_probe(
     timeout: float = 180.0,
     poll_interval: float = 5.0,
     max_poll: float = 300.0,
+    fail_fast: bool = False,
 ) -> dict[str, Any]:
-    """真跑一次生成（消耗额度）。返回结果字典，不抛异常。"""
+    """真跑一次生成；失败保留公共诊断，不把免费预检当生成成功。"""
+    started = time.monotonic()
+    with execution_policy(fail_fast=fail_fast):
+        if is_fail_fast() and spec.is_native:
+            result = {"ok": False, "error": "严格模式不能在本进程完成内置生成验证，未执行委托"}
+        else:
+            try:
+                result = _deep_probe(cfg, spec, prompt, timeout=timeout,
+                                     poll_interval=poll_interval, max_poll=max_poll)
+            except Exception as exc:  # noqa: BLE001 - 网页报告失败，不将厂商异常变成500
+                diag = diagnose_error(exc)
+                error = f"{type(exc).__name__}: {exc}"
+                if diag["detail"]:
+                    error += " —— " + diag["detail"]
+                result = {"ok": False, "error": redact(error), "hint": diag["hint"],
+                          "diagnostic": diag}
+                result.update(_recovery_fields(exc))
+    result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+    return result
+
+
+def _deep_probe(
+    cfg: RouterConfig, spec: ModelSpec, prompt: str = "", *,
+    timeout: float = 180.0, poll_interval: float = 5.0, max_poll: float = 300.0,
+) -> dict[str, Any]:
     default_prompts = {
         "image": "一张极简的纯色背景测试图，中心有一个红色圆形",
         "video": "一个红色圆形缓慢旋转的简单动画",
+        "audio": "你好，这是一次语音测试。请检查发音和停顿是否自然。",
     }
     text = prompt.strip() or default_prompts.get(spec.kind, "连接测试")
 
@@ -425,9 +516,7 @@ def deep_probe(
     request_obj = GenRequest(
         kind=spec.kind,
         prompt=text,
-        requires=list(spec.supports) or (
-            ["text2img"] if spec.kind == "image" else ["text2video"]
-        ),
+        requires=[{"image": "text2img", "video": "text2video", "audio": "text2audio"}.get(spec.kind, "text2img")],
         count=1,
         output_dir=out_dir,
     )
@@ -440,14 +529,7 @@ def deep_probe(
         max_poll=max_poll,
         log=lambda _msg: None,
     )
-    try:
-        result = run_adapter(spec, request_obj, cfg, ctx)
-    except Exception as exc:  # noqa: BLE001 - 探测失败要如实报告，不向上抛
-        return {
-            "ok": False,
-            "error": f"{type(exc).__name__}: {exc}",
-            "hint": "看提示里的 HTTP 状态码：401/403 多为密钥问题，404 多为模型名或地址写错，429 是限流。",
-        }
+    result = run_adapter(spec, request_obj, cfg, ctx)
 
     if result.status == "delegate":
         return {
@@ -458,11 +540,27 @@ def deep_probe(
     if result.status != "ok":
         return {"ok": False, "error": result.error or "生成失败"}
 
+    profiles = [{"path": str(path)} for path in result.files]
+    assessment = {"status": "unverified", "duration": [], "watermark": "unknown",
+                  "local_files_checked": False, "effective_spec": {}}
+    notes = []
+    try:
+        profiles = profile_files(result.files, spec.kind)
+    except Exception as exc:  # noqa: BLE001 - 已生成产物不能因档案异常丢失
+        notes.append(redact(f"生成已成功，产物档案和规格未核验：{type(exc).__name__}: {exc}"))
+    else:
+        try:
+            assessment, notes = assess_result(spec, request_obj, result, profiles)
+        except Exception as exc:  # noqa: BLE001 - 与CLI保留成功产物的边界一致
+            notes.append(redact(f"生成已成功，产物规格未核验：{type(exc).__name__}: {exc}"))
     return {
         "ok": True,
         "files": result.files,
         "urls": result.urls,
         "meta": result.meta,
+        "profiles": profiles,
+        "assessment": assessment,
+        "notes": notes,
     }
 
 

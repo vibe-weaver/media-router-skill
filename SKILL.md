@@ -1,6 +1,6 @@
 ---
 name: media-router
-version: 1.3.0
+version: 1.4.0
 description: >-
   当任务卡在生成图片/视频/语音步骤时，用用户配置的多模型池完成生成并回传产物；
   支持优先级/权重分流、失败降级与熔断。触发词：生成图片、文生图、图生图、改图、
@@ -34,7 +34,7 @@ python3 "<SKILL_DIR>/scripts/media_router.py" generate --kind video --prompt "�
   只有下面明确要求时才读 `references/setup.md`；stdout 是单个 JSON，直接按下面的 status 处理即可，
   日志在 stderr，不要解析。
 - 图生图/图生视频：加 `--image <绝对路径或 URL>`。
-- 常用参数：`--size`、`--negative-prompt`、`--count`、`--output-dir`、`--max-attempts`、
+- 常用参数：`--size`、`--negative-prompt`、`--count`、`--output-dir`、`--max-attempts`、`--fail-fast`、
   `--param key=value`。`--param` 是「点名发给接口的字段」：适配器认识的键优先，
   其余键也会原样透传（火山视频按 `--key value` 拼进提示词），日志里会写出透了哪些。
 - `--kind` 支持 `image` / `video` / `audio`。语音的通路：`dashscope`
@@ -56,7 +56,7 @@ python3 "<SKILL_DIR>/scripts/media_router.py" generate --kind video --prompt "�
 
 | 退出码 | status | 处理 |
 |---|---|---|
-| 0 | ok | 用 `files[].path` 继续原任务；汇报时用 `caption`，不要凭空描述画面；`notes` 里有需要告知用户的信息就转告 |
+| 0 | ok | 本次生成成功，不代表需求全部验收；用 `files[].path` 继续，查看 `assessment` / `notes` 中时长、水印及未核验提示。`caption` 是元数据或可选描述，不凭空描述画面 |
 | 3 | delegate | 没有生成任何文件，见下 |
 | 1 | error | 见下 |
 
@@ -69,12 +69,15 @@ python3 "<SKILL_DIR>/scripts/media_router.py" generate --kind video --prompt "�
 
 **error**
 
-- `fallback_trail[].kind == "config"`：多半缺 Key。让用户运行 `web` 配置，或读
-  `references/setup.md`。
+- `fallback_trail[].kind == "config"`：看公共 `diagnostic` 与厂商原文，可能是密钥、账户、模型或明确的参数校验问题；不要一概让用户换 Key。需要时读 `references/setup.md`。
+- `submission_uncertain: true`：平台可能已经受理并计费，先查平台任务/账单；不得自动重跑、换模型或改用内置工具补生成。已受理任务查询失败、完成却缺少产物或合法但缺少约定结果的响应也属于这条。
+- `phase: delivery` / `partial`，或错误返回含已有 `files` / `urls` / `tasks`：本次可能已有完整子项，不能重做整批。错误里的 `files` 是可直接使用的完整路径列表，`urls` 可单独下载，`tasks` 可用于核对平台任务；按 `hint` 先取回。内联图片撞上 `--no-download` 也不能直接换参数重跑，避免重复计费。
+- 用户要求遇错即停时必须加 `--fail-fast`：禁用 HTTP 重试、候选切换和内置委托；正常等待状态轮询仍继续。`--max-attempts` 仅是候选预算，不能替代它。生成提交默认也不会自动重发，包括自定义接口指定的 PUT/GET；普通只读查询仍按查询策略。
 - `kind == "runtime"`：把 `error` 原文告诉用户，不要含糊成“生成失败”。
 - 如果 `status=error` 且没有 `fallback_trail`：看 `skipped_missing_key` / `notes`，多半是缺 Key
   或模型被停用；让用户先配置，不要反复重试。JSON 顶层直接是 `kind: "config"` 时同理。
 - 不要编造图片描述或文件路径。
+- `status=ok` 但 `notes` 提示描述或档案核验失败时，使用已生成的真实文件并转告限制；不要为补描述/元数据再生成一次媒体。
 
 ## 什么时候用 / 不用
 

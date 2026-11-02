@@ -17,7 +17,7 @@
 ![version](https://img.shields.io/github/v/release/vibe-weaver/media-router-skill?label=version&color=blue)
 ![License](https://img.shields.io/github/license/vibe-weaver/media-router-skill)
 
-**最新版本：[v1.3.0](https://github.com/vibe-weaver/media-router-skill/releases/latest) · [变更记录](CHANGELOG.md)**
+**最新版本：[v1.4.0](https://github.com/vibe-weaver/media-router-skill/releases/latest) · [变更记录](CHANGELOG.md)**
 
 </div>
 
@@ -75,7 +75,7 @@
 | | 能力 | 说明 |
 |---|---|---|
 | **多模型池** | 优先级分档 + 同档加权随机 | 想让 A 永远优先就分开档位；想 5:3 分摊流量就同档设 50:30 |
-| **自动降级** | 失败即换下一个候选 | 缺密钥的模型会被跳过，**且不占用重试次数** |
+| **自动降级** | 明确失败时按候选顺序降级 | 缺密钥不占候选预算；提交结果不确定时停止，避免重复计费；可用 `--fail-fast` 首次失败即停 |
 | **自动熔断** | 连续失败进入冷却 | 冷却期内不再被选中，成功后计数清零；状态落在 `state/health.json` |
 | **永不卡死** | 出厂自带 `native` 兜底 | 图片 / 视频池各带一条 `builtin-imagen` / `builtin-video`（priority 1000000，页面标为「内置」、只可隐藏），真模型都不可用时返回「请调用内置 ImageGen / VideoGen」的委托指令。语音池默认是空的 —— agent 没有标准内置语音工具，不挂假兜底 |
 | **零依赖** | 纯标准库 | 没装 PyYAML 就用内置 `miniyaml`，两条解析路径**逐字节比对**过 |
@@ -178,6 +178,7 @@ python3 scripts/media_router.py web
 刻意没有用「提交一个空任务看报错」这种取巧办法验密钥 —— 万一平台把空提示词当合法输入，花的就是你的钱。
 只读接口拿不到的平台（比如 fal.ai）会**如实标注**「无法免生成校验」，而不是假装测过了 ——
 这种平台就靠「真实测试」来确认，而它会先跑一遍只读预检，预检没过就不往下花钱。
+图像、视频和语音卡片都提供两个测试入口。免费预检通过不保证实际生成成功；真实测试成功仅证明本次调用，语音听感、视频画面和规格仍需验收。
 
 写完的文件：
 
@@ -306,12 +307,12 @@ python3 scripts/selftest.py      # 路由 / 生成 / 降级 / 熔断 / 解析器
 python3 scripts/selftest_web.py  # 网页配置全链路
 ```
 
-两个脚本**都不需要任何 API Key**，全绿就说明这套代码在你的环境里可用
-（Windows 中文环境、Python 3.13 实测：`188/188`、`261/261`）。
+两个脚本**都不需要任何 API Key**，用于验证本机模拟接口与配置链路
+（Windows 中文环境、Python 3.13 实测：`188/188`、`261/261`）；通过不代表全部真实厂商或浏览器行为已验收。
 `selftest_web.py` 里有一项会真的向厂商只读端点发一次请求；完全离线的机器上它会失败，
 其余用例都只打本地回环。
 
-另有 11 个低成本测试，不启浏览器、不写仓库 `dist`：
+另有 20 个低成本测试脚本，不启浏览器、不写仓库 `dist`：
 
 ```bash
 node tests/test_page_render.js       # 页面 JS 渲染（假 DOM，零依赖，需要 Node）
@@ -324,7 +325,16 @@ python3 tests/test_p0_fixes.py       # 计费安全 / 密钥 / 叠加层合并�
 python3 tests/test_p1_fixes.py       # 页面容错 / 冷却排序 / --count / 密钥文件的回归
 python3 tests/test_param_fixes.py    # --param 在各适配器的透传
 python3 tests/test_real_fixes.py     # 真跑后修复：URL 签名 / WAV 头 / caption / 进度
-python3 tests/test_build_runtime.py  # 运行时包冒烟（写临时目录）
+python3 tests/test_build_runtime.py  # 运行时包冒烟及隔离导入（写临时目录）
+python3 tests/test_request_safety.py # 不重放、受理不明、严格策略与线程隔离
+python3 tests/test_diagnostics.py    # 共享诊断、411/1113与脱敏
+python3 tests/test_generation_controls.py # CLI停止、默认兼容及生成后处理隔离
+python3 tests/test_probe_controls.py # 语音预检/真实测试后端与临时严格策略
+python3 tests/test_outcomes.py       # 生效规格、时长/尺寸、水印与未核验
+node tests/test_page_tests.js       # 异步确认、防重复提交与音频预览
+python3 tests/test_generation_lifecycle.py # 已受理任务、部分产物、落盘与跨适配器停止
+python3 tests/test_outcome_conflicts.py    # 嵌套模板与多组精确尺寸冲突
+node tests/test_page_redraw.js       # 实际列表重绘、确认/请求并发与恢复信息
 ```
 
 这些测试只用于开发，不会进运行时包。
@@ -559,10 +569,30 @@ PyYAML 的正则，并且在自检里**逐字节比对两条解析路径**解析
 
 - 一次 `generate` 会按候选序列依次尝试（默认最多 2 个，`defaults.max_attempts`）
 - **缺密钥的模型会被跳过，且不占用尝试次数** —— 否则你还没配 Key，重试预算就被空转吃光
-- `native` 兜底条目不占尝试次数，它永远是最后那个「总能落地」的出口
+- `native` 兜底条目不占候选预算，默认排在最后；委托不等于生成成功。严格模式不自动委托
 - 某模型连续失败达 `failure_threshold` 次后进入 `cooldown_seconds` 冷却，冷却期内不再被选中；
   成功后失败计数清零。状态在 `state/health.json`
 - 全部模型都在冷却时不会直接失败，而是挑**最早恢复**的那个继续试（宁可慢也别断）
+
+### 失败即停与计费安全
+
+`--max-attempts N` 只控制第三方候选预算，不控制 HTTP 重试，也不保证不进入内置兜底。
+需要遇错立即停下时，使用：
+
+```bash
+python3 scripts/media_router.py generate --kind audio --model 已配置的ID --prompt "你好，这是一次语音测试。" --count 1 --fail-fast
+```
+
+- 生成提交无论使用 POST/PATCH，还是自定义接口指定的 PUT/GET，均不会在 HTTP 或网络错误后自动重发；普通只读查询仍按查询策略执行。
+- 提交超时、断连、HTTP 协议接收错误、408/425 或 5xx 无法证明平台未受理；需要 JSON 却返回空、损坏、合法但缺少约定结果的响应，也会安全停止。取得任务 ID 后，查询错误、超时、未知状态或完成却缺产物同样停止候选和内置委托，返回 `submission_uncertain: true`。先查平台任务或账单，不要直接重跑。
+- 只要已有子项、URL 或内联媒体，后续提交失败、落盘/重命名失败或内联结果与 `--no-download` 冲突，都返回错误而不重做整批；不累计生成模型故障。任务明确失败但同时附有部分产物也遵守此规则。仅明确拒绝或明确失败且没有已有产物时，默认仍可降级。
+- 错误返回按已知证据保留 `files`、`urls`、`tasks`、`phase` 和恢复建议；错误里的 `files` 是完整文件路径列表，成功结果仍为档案对象列表。`tasks` 含任务 ID、脱敏查询地址及状态；产物 URL 保留可用签名。已有文件可直接使用，URL 可单独下载，不要再次调用生成去取回。错误 JSON 不复制整段内联 base64。
+- 媒体已生成后，可选描述、元数据核验或健康记录失败不会再次生成；保留产物和本次生成成功状态，在 `notes` 提示处理失败，缺少核验证据时 `assessment.status` 为 `unverified`。
+- 默认 GET 查询与下载保留有界重试。开启 `--fail-fast` 后这些重试也禁用；正常任务的等待状态轮询仍继续。
+- 配置页的「首次失败即停」仅作用于本次模型测试，不保存到模型配置；同模型测试进行中不能重复提交。列表重绘后仍保留当前页的处理中/完成结果和按钮锁，刷新整个浏览器页面则清空这份内存记录。失败时展示已有文件、产物 URL 和任务恢复入口。API 的 `deep` 只接受 JSON 布尔值：缺省或 `false` 为免费预检，只有 `true` 才可执行真实生成；其他类型在预检前报输入错误。
+- 明确的欠费、权限、模型不存在、参数校验错误不计熔断。`InvalidParameter` 不一定就是用户参数错误，例如包含引擎错误 411 时会标为根因待确认。
+
+`status: ok` 表示本次生成调用成功，不代表需求全部验收。查看 `assessment` 和 `notes`：视频请求与实际时长不符、水印存在、无法核验会单列说明；实际分辨率、大小和格式见 `files`。只有精确宽高能直接比较尺寸；比例、`2k` 等命名尺寸或分辨率标签尚未核对时标为 `unverified`，不猜像素或平台覆盖顺序。缺少实际宽高也不声称图像/视频规格已核对。多组精确尺寸冲突时不选第一组，而是明确标为未核验；自定义接口的未知嵌套模板也不据此声称平台默认。没有水印证据只表示未知，不等于无水印。不自动裁剪、去水印或重生成。
 
 想清空熔断状态：`python3 scripts/media_router.py health --reset`
 
@@ -629,6 +659,9 @@ media-router/
 │       ├── selector.py       # 权重 / 优先级排序算法
 │       ├── health.py         # 熔断与冷却
 │       ├── transport.py      # HTTP 传输（纯标准库）
+│       ├── lifecycle.py      # 候选局部任务/产物证据及安全停止
+│       ├── diagnostics.py    # 共享错误诊断与脱敏
+│       ├── outcomes.py       # 保守需求核验与生效规格白名单
 │       ├── adapters.py       # 各 provider 适配器
 │       ├── caption.py        # 元数据与视觉描述
 │       ├── catalog.py        # 平台目录（中文说明 + 默认地址 + 只读校验端点）
@@ -642,7 +675,7 @@ media-router/
 ├── references/
 │   ├── providers.md          # 各平台接入参数对照
 │   └── setup.md              # 配置/排障说明（按需读，正常生成不需要）
-├── tests/                    # 11 个低成本测试（仅开发用，不进运行时包）
+├── tests/                    # 20 个低成本测试脚本（仅开发用，不进运行时包）
 ├── tools/build_pack.py       # 打包：--runtime 生成干净运行时目录，默认生成市场 pack
 ├── pack/manifest.json        # DSH 插件市场上架元数据
 └── dist/                     # 打包产物（不入库）
@@ -696,7 +729,7 @@ media-router/
 
 默认**运行命令时的当前工作目录**下的 `./outputs/`（不是 skill 目录 —— 很多 agent 沙箱把 skill
 目录设成只读，落在 cwd 你才拿得到），并**按类目再分一层**：图片进 `outputs/image/`，
-视频进 `outputs/video/`。文件名形如 `image_jimeng-seedream_20260916_221630412_01.png`
+视频进 `outputs/video/`。文件名形如 `image_<模型ID>_<日期>_<时间戳>_<序号>.png`
 （时间戳 + 序号，不会互相覆盖）。改目录的优先级：`--output-dir`（本次命令）
 > `models.yaml` 的 `defaults.output_dir`（默认值，出厂是 `null`）> `MEDIA_ROUTER_OUTPUT_DIR`
 > 环境变量 > 当前工作目录 `./outputs`。上面这几种来源指的都是**根目录**，
@@ -729,11 +762,13 @@ id 会被直接拒绝：
 - 密钥**只**存在 `config/secrets.yaml`（手写）或 `config/secrets.web.yaml`（网页配置写入），
   两者都已在 `.gitignore` 里，不会进入版本库。仓库里的 `config/secrets.example.yaml` 是空白模板，
   复制成 `secrets.yaml` 填入真实值即可
-- `config/models.yaml`（你手写的模型池）只含环境变量名（如 `api_key_env: ARK_API_KEY`），
-  不含密钥本身，可以安全提交
+- 仓库中的 `config/models.yaml` 是出厂模板，只含环境变量名（如 `api_key_env: ARK_API_KEY`）。
+  你自行添加的模型、私有地址或内联密钥不一定适合公开；发布前应恢复模板并检查内容，不能仅凭文件名判断安全
 - `config/models.web.yaml`（配置页面生成）虽然也没有密钥，但含你的厂商清单和私有网关地址，
   **同样不入库**；仓库里只留 `models.web.example.yaml` 作格式示例
 - `state/`（熔断状态）和 `outputs/`（生成产物）同样不入库
+- 程序支持的 `secrets.json`、`secrets.web.json`、`models.web.json` 也有对应忽略规则。
+  `.gitignore` 和打包白名单只是防误提交，不会清除本地数据，也不能替代发布前内容检查
 
 推送到公开仓库前，建议跑一遍自查：
 

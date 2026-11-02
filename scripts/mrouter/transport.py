@@ -18,6 +18,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
+from http.client import BadStatusLine, IncompleteRead, LineTooLong
 from pathlib import Path
 from typing import Any, Callable
 
@@ -27,11 +30,28 @@ USER_AGENT = f"media-router/{__version__} (+skill)"
 
 RETRY_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
-#: 这些方法在**网络层失败**时一律不重发。
-#: 生成类接口（提交任务）几乎都是 POST：超时意味着"没收到响应"，而不是"没执行"——
-#: 平台很可能已经收下并开始计费，重发一次就是两个任务、两笔钱，而第一个任务的结果
-#: 因为没有 task_id 永远拿不回来。429 / 5xx 这类"服务端明确回了话"的情况仍然重试。
+#: 提交类方法遇到任何 HTTP / 网络失败都不重发；错误响应也不能证明没有执行。
 NON_REPLAYABLE_METHODS = {"POST", "PATCH"}
+
+_FAIL_FAST = ContextVar("media_router_fail_fast", default=False)
+_SUBMISSION_HINT = (
+    "（提交类请求不会自动重发：提交结果不确定，服务端可能已经受理并计费，"
+    "请先用平台控制台确认任务是否已创建，再决定是否重跑）"
+)
+
+
+@contextmanager
+def execution_policy(*, fail_fast: bool = False):
+    """本次执行的局部策略；内层只能提升严格度，退出时恢复原策略。"""
+    token = _FAIL_FAST.set(_FAIL_FAST.get() or bool(fail_fast))
+    try:
+        yield
+    finally:
+        _FAIL_FAST.reset(token)
+
+
+def is_fail_fast() -> bool:
+    return _FAIL_FAST.get()
 
 #: 显式代理开关。不设 = 沿用 HTTP(S)_PROXY 环境变量；设成 none/off/direct = 直连；
 #: 设成 URL = 所有外部请求走这个代理。回环地址永远直连，不受这里影响。
@@ -125,10 +145,14 @@ def open_request(req: urllib.request.Request, timeout: float):
 class HttpError(RuntimeError):
     """HTTP 层错误，带上状态码与响应片段方便定位。"""
 
-    def __init__(self, message: str, status: int | None = None, body: str = ""):
-        super().__init__(message)
+    def __init__(
+        self, message: str, status: int | None = None, body: str = "", *,
+        submission_uncertain: bool = False,
+    ):
+        super().__init__(redact(message))
         self.status = status
-        self.body = (body or "")[:800]
+        self.body = redact(body or "")[:800]
+        self.submission_uncertain = bool(submission_uncertain)
 
 
 class PollTimeout(RuntimeError):
@@ -136,22 +160,37 @@ class PollTimeout(RuntimeError):
 
 
 class HttpResponse:
-    def __init__(self, status: int, headers: dict[str, str], body: bytes):
+    def __init__(
+        self, status: int, headers: dict[str, str], body: bytes, *, method: str = "",
+        generation_submission: bool = False,
+    ):
         self.status = status
         self.headers = headers
         self.body = body
+        self.method = method.upper()
+        self.generation_submission = bool(generation_submission)
 
     @property
     def text(self) -> str:
         return self.body.decode("utf-8", errors="replace")
 
     def json(self) -> Any:
+        uncertain = self.generation_submission or self.method in NON_REPLAYABLE_METHODS
+        hint = f"\n{_SUBMISSION_HINT}" if uncertain else ""
         if not self.body:
-            return None
+            if not uncertain:
+                return None
+            raise HttpError(
+                f"响应为空，无法解析 JSON{hint}", self.status, self.text,
+                submission_uncertain=True,
+            )
         try:
             return json.loads(self.body.decode("utf-8", errors="replace"))
         except json.JSONDecodeError as exc:
-            raise HttpError(f"响应不是合法 JSON：{self.text[:300]}") from exc
+            raise HttpError(
+                f"响应不是合法 JSON：{redact(self.text[:300])}{hint}", self.status, self.text,
+                submission_uncertain=uncertain,
+            ) from exc
 
 
 def _encode_multipart(
@@ -188,14 +227,12 @@ def request(
     timeout: float = 60.0,
     max_retries: int = 2,
     retry_backoff: float = 1.6,
+    generation_submission: bool = False,
 ) -> HttpResponse:
-    """发起请求；对 429/5xx/网络抖动自动重试。非 2xx 抛 HttpError。
+    """发起请求；非 2xx 抛 HttpError，提交类请求永不自动重放。
 
-    重试分两种，不能一视同仁：
-
-    * 服务端**回了响应**（429/5xx）：请求有没有被受理是可知的，重试安全；
-    * **网络层失败**（超时 / 连接断）：请求可能已经被受理并计费。GET/HEAD/PUT/DELETE
-      这类幂等方法重试没问题，POST/PATCH 提交一次就够 —— 见 NON_REPLAYABLE_METHODS。
+    默认保留幂等请求的有界重试；严格模式连查询也只发一次。
+    POST/PATCH 的 408/425/5xx 或网络、接收失败不能证明未受理，须先查平台任务。
     """
     if params:
         query = urllib.parse.urlencode(
@@ -221,8 +258,8 @@ def request(
 
     attempt = 0
     last_error: Exception | None = None
-    #: 网络层失败能不能重来：POST / PATCH 提交过就不敢再提交一次（可能已计费）
-    replayable = method.upper() not in NON_REPLAYABLE_METHODS
+    #: HTTP 和网络失败共用此门控，避免错误响应触发重复提交。
+    replayable = not generation_submission and method.upper() not in NON_REPLAYABLE_METHODS
     while attempt <= max_retries:
         attempt += 1
         req = urllib.request.Request(
@@ -231,31 +268,50 @@ def request(
         try:
             with open_request(req, timeout=timeout) as resp:
                 return HttpResponse(
-                    resp.status, dict(resp.headers.items()), resp.read()
+                    resp.status, dict(resp.headers.items()), resp.read(), method=method.upper(),
+                    generation_submission=generation_submission,
                 )
         except urllib.error.HTTPError as exc:
             body = ""
+            receive_failed = False
             try:
                 body = exc.read().decode("utf-8", errors="replace")
+            except (
+                urllib.error.URLError, TimeoutError, OSError,
+                IncompleteRead, BadStatusLine, LineTooLong,
+            ) as read_exc:
+                receive_failed = True
+                partial = getattr(read_exc, "partial", b"")
+                if isinstance(partial, bytes):
+                    body = partial.decode("utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 pass
-            if exc.code in RETRY_STATUS and attempt <= max_retries:
+            if (replayable and not is_fail_fast()
+                    and exc.code in RETRY_STATUS and attempt <= max_retries):
                 last_error = HttpError(f"HTTP {exc.code}", exc.code, body)
                 time.sleep(retry_backoff ** attempt)
                 continue
-            raise HttpError(f"HTTP {exc.code} {redact(url)}", exc.code, body) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            if attempt <= max_retries and replayable:
+            uncertain = not replayable and (
+                receive_failed or exc.code in (408, 425) or 500 <= exc.code < 600
+            )
+            hint = f"\n{_SUBMISSION_HINT}" if uncertain else ""
+            raise HttpError(
+                f"HTTP {exc.code} {redact(url)}{hint}", exc.code, body,
+                submission_uncertain=uncertain,
+            ) from exc
+        except (
+            urllib.error.URLError, TimeoutError, OSError,
+            IncompleteRead, BadStatusLine, LineTooLong,
+        ) as exc:
+            if attempt <= max_retries and replayable and not is_fail_fast():
                 last_error = exc
                 time.sleep(retry_backoff ** attempt)
                 continue
-            hint = (
-                ""
-                if replayable
-                else "（提交类请求不会自动重发：服务端可能已经受理并计费，"
-                "请先用平台控制台确认任务是否已创建，再决定是否重跑）"
-            )
-            raise HttpError(f"网络错误：{exc} ({redact(url)}){hint}") from exc
+            hint = "" if replayable else f"\n{_SUBMISSION_HINT}"
+            raise HttpError(
+                f"网络错误：{exc} ({redact(url)}){hint}",
+                submission_uncertain=not replayable,
+            ) from exc
 
     raise HttpError(f"请求失败：{last_error}")
 
@@ -293,12 +349,15 @@ def download(
     一个名字正常、内容截断的"产物"；而重试时 _unique_path 只会另起一个 -1 后缀，
     那半截文件就永远留在 outputs 里，用户拿它当生成结果引用，后面全错。
 
-    下载**必须重试**：这一步失败时任务已经在平台侧生成并扣过费了，一次 CDN 抖动
-    就把结果丢掉，等于白花钱重跑一遍。GET 是幂等的，重试没有副作用。
+    默认保留有界重试：这一步失败时任务已经在平台侧生成并扣过费了，一次 CDN
+    抖动不应丢掉结果。GET 是幂等的，重试没有生成副作用；严格模式只下载一次。
     403/404 不重试 —— 那多半是签名地址过期或文件被清，重试也还是同一句话。
     """
     dest = Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HttpError(f"下载目录不可写：{exc} ({redact(url)})") from exc
     final_headers = {"User-Agent": USER_AGENT}
     for key, value in (headers or {}).items():
         if value is not None:
@@ -326,21 +385,25 @@ def download(
             break
         except urllib.error.HTTPError as exc:
             _drop()
-            if exc.code in RETRY_STATUS and attempt <= max_retries:
+            if not is_fail_fast() and exc.code in RETRY_STATUS and attempt <= max_retries:
                 time.sleep(retry_backoff ** attempt)
                 continue
             raise HttpError(f"下载失败 HTTP {exc.code}：{redact(url)}", exc.code) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, IncompleteRead, BadStatusLine, LineTooLong) as exc:
             _drop()
-            if attempt <= max_retries:
+            if not is_fail_fast() and attempt <= max_retries:
                 time.sleep(retry_backoff ** attempt)
                 continue
             raise HttpError(f"下载失败：{exc} ({redact(url)})") from exc
 
-    if not tmp.exists() or tmp.stat().st_size == 0:
+    try:
+        if not tmp.exists() or tmp.stat().st_size == 0:
+            _drop()
+            raise HttpError(f"下载得到空文件：{redact(url)}")
+        tmp.replace(dest)
+    except OSError as exc:
         _drop()
-        raise HttpError(f"下载得到空文件：{redact(url)}")
-    tmp.replace(dest)
+        raise HttpError(f"下载完成但落盘失败：{exc} ({redact(url)})") from exc
     return dest
 
 

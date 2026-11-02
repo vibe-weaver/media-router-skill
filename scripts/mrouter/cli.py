@@ -39,8 +39,17 @@ from . import catalog
 from .caption import build_caption, caption_enabled, profile_files
 from .config import MODEL_KINDS, ConfigError, RouterConfig, load_config
 from .health import HealthStore
+from .lifecycle import GenerationInterrupted
 from .selector import plan_attempts, rank_candidates
-from .transport import proxy_description, redact
+from .transport import execution_policy, is_fail_fast, proxy_description, redact
+from .diagnostics import (
+    CONFIG_ERROR_CODES,
+    diagnose_error,
+    error_payload as _error_payload,
+    vendor_error_code as _vendor_error_code,
+    vendor_error_detail as _vendor_error_detail,
+)
+from .outcomes import assess_result
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -131,86 +140,7 @@ def _parse_params(pairs: list[str] | None) -> dict[str, Any]:
     return out
 
 
-#: 「账户 / 参数 / 开通状态」类错误码。它们和模型本身健不健康无关 ——
-#: 充值、改参数、去控制台开通之后就能好，重试一万次也还是同一句话。
-#: 归为 config 类有两个后果：不计熔断，也不会把模型打进冷却；
-#: 否则用户充完值回来，还得干等 cooldown 秒数（默认 5 分钟），
-#: 表现出来的样子是「钱充了还是不行」。
-CONFIG_ERROR_CODES = {
-    "arrearage",          # 百炼：账户欠费
-    "insufficientbalance",  # 余额不足
-    "invalidparameter",   # 参数不合法（尺寸、时长、比例）
-    "invalidapikey",      # 密钥无效 / 过期
-    "modelnotopen",       # 模型未开通
-    "modelnotfound",      # 模型名不存在
-    "unpurchased",        # 未购买
-    "accessdenied",       # 无权限（含欠费导致的 Access denied）
-    "1102",               # 可灵：Account balance not enough（余额/资源包不足）
-    # 智谱：HTTP 429 + code 1113「余额不足或无可用资源包」。
-    # 它挂在 429 上，光看状态码会被当成限流，于是重试三次、再进冷却 ——
-    # 实际是没钱，重试一百次也一样。
-    "1113",
-}
-
-
-def _error_payload(exc: Exception) -> dict[str, Any] | None:
-    """把 HttpError 里的响应体解析成 dict；不是 JSON 对象就返回 None。"""
-    body = (getattr(exc, "body", "") or "").strip()
-    if not body:
-        return None
-    try:
-        payload = json.loads(body)
-    except (TypeError, ValueError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _vendor_error_code(exc: Exception) -> str:
-    """厂商响应里的错误码，用于判断这是不是「配置类」问题。
-
-    各家包装位置不同：多数是顶层 ``code``，OpenAI 风格在 ``error.code``，
-    火山豆包语音在 ``header.code`` —— 都要认，否则同一个错误会时好时坏地分类。
-    """
-    payload = _error_payload(exc)
-    if not payload:
-        return ""
-    code = payload.get("code") or payload.get("error_code") or ""
-    for holder in ("error", "header"):
-        nested = payload.get(holder)
-        if not code and isinstance(nested, dict):
-            code = nested.get("code") or ""
-    return str(code).strip()
-
-
-def _vendor_error_detail(exc: Exception) -> str:
-    """把厂商响应体压成一行人话，附在错误信息后面。
-
-    没有这一步，任何 4xx 都只剩 ``HttpError: HTTP 400 <url>``：账户欠费
-    （百炼 ``Arrearage``）、参数非法（``InvalidParameter``）、模型未开通，
-    在用户眼里全是一模一样的一句话，只能被 hint 带着去瞎查密钥。
-    ``HttpError`` 里本来就存了 body（transport 已截到 800 字符），
-    只是以前没往上报。
-
-    优先取结构化字段（code + message），拿不到 JSON 就退化成原文单行。
-    """
-    body = (getattr(exc, "body", "") or "").strip()
-    if not body:
-        return ""
-    payload = _error_payload(exc)
-    if payload:
-        code = payload.get("code") or payload.get("error_code") or ""
-        message = payload.get("message") or payload.get("msg") or ""
-        for holder in ("error", "header"):
-            nested = payload.get(holder)
-            if isinstance(nested, dict):
-                code = code or nested.get("code") or ""
-                message = message or nested.get("message") or ""
-            elif isinstance(nested, str):
-                message = message or nested
-        parts = [str(p).strip() for p in (code, message) if str(p).strip()]
-        if parts:
-            return " ".join(parts)[:200]
-    return " ".join(body.split())[:200]
+# 厂商错误解析统一由 diagnostics 提供；保留以上导入别名供嵌入调用兼容。
 
 
 def _can_generate(kind: str, spec: Any) -> bool:
@@ -411,6 +341,9 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     health = HealthStore(cfg.health_path)
     ordered, notes = _resolve(cfg, health, args)
     attempts, skipped = _plan(cfg, ordered, args.max_attempts)
+    if getattr(args, "fail_fast", False):
+        attempts = [spec for spec in attempts if not spec.is_native][:1]
+        notes["fail_fast"] = True
     snapshot = health.snapshot([m.id for m in ordered])
 
     blocked = [m.id for m in attempts if not _can_generate(args.kind, m)]
@@ -448,6 +381,12 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
+    """策略覆盖适配器、下载和可选描述；直接嵌入调用同样生效。"""
+    with execution_policy(fail_fast=bool(getattr(args, "fail_fast", False))):
+        return _cmd_generate(args)
+
+
+def _cmd_generate(args: argparse.Namespace) -> int:
     started = time.time()
     cfg = load_config()
     health = HealthStore(cfg.health_path)
@@ -507,6 +446,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
         return EXIT_ERROR
 
     trail: list[dict[str, Any]] = []
+    attempted_ids: list[str] = []
+    stop_reason = ""
+    last_diagnostic: dict[str, Any] = {}
     #: 因为"这类目还没接适配器"而失败的次数。它不算模型故障，既不计熔断，
     #: 也不该让顶层提示变成"去检查密钥"。
     unsupported: list[str] = []
@@ -536,8 +478,21 @@ def cmd_generate(args: argparse.Namespace) -> int:
         return EXIT_ERROR
 
     for spec in attempts:
+        if spec.is_native and is_fail_fast():
+            _emit(
+                {
+                    "status": "error", "kind": args.kind,
+                    "error": "严格模式不能在本进程完成内置生成验证，未执行内置委托",
+                    "attempted": attempted_ids, "fallback_trail": trail,
+                    "routing": notes, "notes": notes_out,
+                    "elapsed_ms": int((time.time() - started) * 1000),
+                    "hint": "请选择已配置的第三方模型，或在明确接受委托时关闭 --fail-fast。",
+                }, args.pretty,
+            )
+            return EXIT_ERROR
         attempt_started = time.time()
         label = f"{spec.id}({spec.provider})"
+        attempted_ids.append(spec.id)
         try:
             if spec.is_native:
                 key, source = "", "无需密钥"
@@ -548,104 +503,6 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
             _log(f"尝试 {label}，优先级={spec.priority} 权重={spec.weight}")
             result: GenResult = run_adapter(spec, req, cfg, _make_ctx(cfg, key, source))
-
-            if result.status == "delegate":
-                _log(f"{label} 走内置工具通道，交还 agent 执行")
-                delegate_notes = list(notes_out)
-                if trail:
-                    # 兜底条目永远排最后，它被选中就意味着前面已经有真模型挂了。
-                    # 只给 fallback_trail 不够醒目：调用方很容易把 delegate 当成
-                    # 「本来就走这条路」，从而漏掉「你配的模型刚才失败了」这个事实。
-                    delegate_notes.append(
-                        "本次不是首选通道：内置兜底是在 "
-                        + "、".join(str(t.get("model")) for t in trail)
-                        + " 失败之后才接手的，失败原因见 fallback_trail"
-                    )
-                _emit(
-                    {
-                        "status": "delegate",
-                        "kind": args.kind,
-                        "model": {"id": spec.id, "provider": spec.provider},
-                        "delegate": result.delegate,
-                        "routing": notes,
-                        "fallback_trail": trail,
-                        "elapsed_ms": int((time.time() - started) * 1000),
-                        "notes": delegate_notes,
-                    },
-                    args.pretty,
-                )
-                return EXIT_DELEGATE
-
-            health.record_success(spec.id)
-            files = list(result.files)
-            profiles = profile_files(files, args.kind)
-
-            # --count 是"要几个"的承诺。各平台的批量能力并不一致（有的认 n，
-            # 有的压根没有这个参数），返回数量少于要求时必须说清楚，
-            # 否则用户以为生成了 3 张、实际只有 1 张，还按 3 张去排下游版式。
-            if req.count and req.count > 1 and len(files) < req.count:
-                notes_out.append(
-                    f"本次要求 {req.count} 个产物，实际只得到 {len(files)} 个："
-                    f"该模型的接口可能不支持批量，或平台只返回了一部分。"
-                    f"需要更多可以分批执行，或用 --param <数量字段名>={req.count} 指定平台字段。"
-                )
-
-            # 没指定尺寸时平台会给它自己的默认值（百炼 qwen-image 是 2048×2048），
-            # 一张 5MB+ 的图对 PPT/网页缩略图这类下游往往过大，而下一次调用还是会
-            # 照旧。这里只提示一次，不改产物、不改配置。
-            if args.kind == "image" and files and not req.size:
-                params_size = (spec.params or {}).get("size")
-                first = profiles[0] if profiles else {}
-                width_px, height_px = first.get("width"), first.get("height")
-                if not params_size and width_px and height_px and width_px * height_px >= 1600 * 1600:
-                    notes_out.append(
-                        f"本次未指定尺寸，平台默认出了 {width_px}×{height_px}"
-                        f"（{first.get('size_human', '')}）。需要更小的图用 --size 1328x1328，"
-                        f"或在模型配置里填 params.size，之后每次都会沿用"
-                    )
-
-            caption_text = ""
-            if files:
-                caption_text, cap_notes = build_caption(
-                    cfg, files, args.kind, goal=args.prompt or "", profiles=profiles
-                )
-                notes_out.extend(cap_notes)
-
-            _emit(
-                {
-                    "status": "ok",
-                    "kind": args.kind,
-                    "model": {
-                        "id": spec.id,
-                        "provider": spec.provider,
-                        "model": result.meta.get("model") or spec.model or spec.id,
-                    },
-                    "files": profiles,
-                    "urls": list(result.urls),
-                    "caption": caption_text,
-                    "caption_mode": caption_enabled(cfg),
-                    "request": {
-                        "prompt": req.prompt,
-                        "negative_prompt": req.negative_prompt,
-                        "size": req.size,
-                        "aspect_ratio": req.aspect_ratio,
-                        "duration": req.duration,
-                        "count": req.count,
-                        "images": req.images,
-                    },
-                    "meta": result.meta,
-                    "routing": notes,
-                    "fallback_trail": trail,
-                    "elapsed_ms": int((time.time() - started) * 1000),
-                    "notes": notes_out,
-                    "hint": (
-                        "产物已落盘。若后续步骤需要引用它，直接用 files[].path 的绝对路径。"
-                        + ("caption 字段即文字描述，可直接用于文字汇报。" if caption_text else "")
-                    ),
-                },
-                args.pretty,
-            )
-            return EXIT_OK
 
         except KindNotSupported as exc:
             _log(f"{label} 跳过：{exc}")
@@ -693,9 +550,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
                     "model": {"id": spec.id, "provider": spec.provider},
                     "urls": list(getattr(exc, "urls", []) or []),
                     "files": list(getattr(exc, "files", []) or []),
+                    "tasks": list(getattr(exc, "tasks", []) or []),
+                    "phase": exc.phase,
+                    "submission_uncertain": exc.submission_uncertain,
+                    "stop_reason": "generated",
                     "fallback_trail": trail,
                     "routing": notes,
-                    "attempted": [m.id for m in attempts],
+                    "attempted": attempted_ids,
                     "elapsed_ms": int((time.time() - started) * 1000),
                     "notes": notes_out,
                     "hint": (
@@ -706,52 +567,137 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 args.pretty,
             )
             return EXIT_ERROR
-        except Exception as exc:  # noqa: BLE001 - 任何 provider 异常都要能降级
+        except GenerationInterrupted as exc:
+            diagnostic = diagnose_error(exc)
+            message = redact(str(exc))
+            trail.append({"model": spec.id, "provider": spec.provider,
+                          "error": message, "kind": diagnostic["kind"],
+                          "diagnostic": diagnostic,
+                          "elapsed_ms": int((time.time() - attempt_started) * 1000)})
+            _log(f"{label} 已停止后续生成：{message}")
+            _emit({
+                "status": "error", "kind": args.kind, "error": message,
+                "model": {"id": spec.id, "provider": spec.provider},
+                "files": list(exc.files), "urls": list(exc.urls), "tasks": list(exc.tasks),
+                "phase": exc.phase, "submission_uncertain": exc.submission_uncertain,
+                "stop_reason": "uncertain" if exc.submission_uncertain else "generated",
+                "diagnostic": diagnostic, "fallback_trail": trail,
+                "routing": notes, "attempted": attempted_ids, "notes": notes_out,
+                "elapsed_ms": int((time.time() - started) * 1000), "hint": exc.hint,
+            }, args.pretty)
+            return EXIT_ERROR
+        except Exception as exc:  # noqa: BLE001 - 统一诊断后再决定是否允许降级
+            last_diagnostic = diagnose_error(exc)
             message = f"{type(exc).__name__}: {exc}"
-            detail = _vendor_error_detail(exc)
-            if detail:
-                # 厂商原文是唯一能直接指出「到底哪不对」的信息，不能丢
-                message = f"{message} —— {detail}"
-            status = exc.status if isinstance(exc, HttpError) else None
-            code = _vendor_error_code(exc)
-            config_like = status in (401, 402, 403) or code.lower() in CONFIG_ERROR_CODES
-            if config_like:
-                # 密钥无效 / 账户欠费 / 参数不合法，都是**配置问题**，和 ConfigError
-                # 一样不计熔断。一把填错的密钥或一次欠费会把所有候选逐个打成冷却，
-                # 而冷却对「配置错」毫无意义（下次还是同样的错），充值/改参数
-                # 回来还得干等冷却，只会把「到底能不能用」搅得更浑。
-                why = f"错误码 {code}" if code else f"HTTP {status}"
-                _log(f"{label} 配置不可用（{why}）：{message}")
-                entry = {
-                    "model": spec.id,
-                    "provider": spec.provider,
-                    "error": message,
-                    "kind": "config",
-                    "elapsed_ms": int((time.time() - attempt_started) * 1000),
-                }
-                if code:
-                    entry["error_code"] = code
-                if isinstance(exc, HttpError) and exc.body:
-                    entry["response_body"] = exc.body[:600]
-                trail.append(entry)
-                continue
-            _log(f"{label} 失败：{message}")
-            outcome = health.record_failure(spec.id, message, threshold, cooldown)
+            if last_diagnostic["detail"]:
+                message += " —— " + last_diagnostic["detail"]
+            kind = last_diagnostic["kind"]
+            _log(f"{label} {'配置不可用' if kind == 'config' else '失败'}：{message}")
             entry = {
-                "model": spec.id,
-                "provider": spec.provider,
-                "error": message,
-                "kind": "runtime",
+                "model": spec.id, "provider": spec.provider,
+                "error": message, "kind": kind,
+                "diagnostic": last_diagnostic,
                 "elapsed_ms": int((time.time() - attempt_started) * 1000),
-                **outcome,
             }
+            if last_diagnostic["error_code"]:
+                entry["error_code"] = last_diagnostic["error_code"]
             if isinstance(exc, HttpError) and exc.body:
-                # 结构化摘要之外的原文一并留着：custom / generic_http 的
-                # 报错格式五花八门，压平会丢关键字段
                 entry["response_body"] = exc.body[:600]
-            if outcome.get("circuit_open"):
-                entry["note"] = f"连续失败达 {threshold} 次，进入 {cooldown:.0f} 秒冷却"
+            if kind == "runtime":
+                outcome = health.record_failure(spec.id, redact(message), threshold, cooldown)
+                entry.update(outcome)
+                if outcome.get("circuit_open"):
+                    entry["note"] = f"连续失败达 {threshold} 次，进入 {cooldown:.0f} 秒冷却"
             trail.append(entry)
+            if last_diagnostic["submission_uncertain"]:
+                stop_reason = "uncertain"
+                break
+        else:
+            # 适配器已完成：下面任何后处理或输出异常都不得回到生成降级分支。
+            if result.status == "delegate":
+                _log(f"{label} 走内置工具通道，交还 agent 执行")
+                delegate_notes = list(notes_out)
+                if trail:
+                    delegate_notes.append(
+                        "本次不是首选通道：内置兜底是在 "
+                        + "、".join(str(t.get("model")) for t in trail)
+                        + " 失败之后才接手的，失败原因见 fallback_trail"
+                    )
+                _emit({
+                    "status": "delegate", "kind": args.kind,
+                    "model": {"id": spec.id, "provider": spec.provider},
+                    "delegate": result.delegate, "routing": notes,
+                    "fallback_trail": trail,
+                    "elapsed_ms": int((time.time() - started) * 1000),
+                    "notes": delegate_notes,
+                }, args.pretty)
+                return EXIT_DELEGATE
+
+            try:
+                if health.record_success(spec.id) is False:
+                    notes_out.append("生成已成功，健康状态未能回写：本次状态未保存，不影响已生成产物。")
+            except Exception as exc:  # noqa: BLE001 - 状态记录不影响已生成产物
+                notes_out.append(redact(f"生成已成功，健康状态未能回写：{type(exc).__name__}: {exc}"))
+
+            files = list(result.files)
+            # 后处理失败也保留真实路径，不用猜测的大小/格式冒充本地核验结果。
+            profiles = [{"path": str(path)} for path in files]
+            assessment = {
+                "status": "unverified", "duration": [], "watermark": "unknown",
+                "local_files_checked": False, "effective_spec": {},
+            }
+            try:
+                profiles = profile_files(files, args.kind)
+            except Exception as exc:  # noqa: BLE001 - 禁止因档案读取失败重新生成
+                notes_out.append(redact(f"生成已成功，产物档案和规格未核验：{type(exc).__name__}: {exc}"))
+            else:
+                try:
+                    assessment, assessment_notes = assess_result(spec, req, result, profiles)
+                    notes_out.extend(assessment_notes)
+                except Exception as exc:  # noqa: BLE001 - 不将验收故障计为生成故障
+                    notes_out.append(redact(f"生成已成功，产物规格未核验：{type(exc).__name__}: {exc}"))
+
+            if req.count and req.count > 1 and len(files) < req.count:
+                notes_out.append(
+                    f"本次要求 {req.count} 个产物，实际只得到 {len(files)} 个："
+                    f"该模型的接口可能不支持批量，或平台只返回了一部分。"
+                    f"需要更多可以分批执行，或用 --param <数量字段名>={req.count} 指定平台字段。"
+                )
+
+            caption_text = ""
+            if files:
+                try:
+                    caption_text, cap_notes = build_caption(
+                        cfg, files, args.kind, goal=args.prompt or "", profiles=profiles
+                    )
+                    notes_out.extend(cap_notes)
+                except Exception as exc:  # noqa: BLE001 - 可选描述失败不能再次生成媒体
+                    notes_out.append(redact(f"生成已成功，文字描述未生成：{type(exc).__name__}: {exc}"))
+
+            _emit({
+                "status": "ok", "kind": args.kind,
+                "model": {"id": spec.id, "provider": spec.provider,
+                          "model": result.meta.get("model") or spec.model or spec.id},
+                "files": profiles, "urls": list(result.urls),
+                "caption": caption_text, "caption_mode": caption_enabled(cfg),
+                "request": {
+                    "prompt": req.prompt, "negative_prompt": req.negative_prompt,
+                    "size": req.size, "aspect_ratio": req.aspect_ratio,
+                    "duration": req.duration, "count": req.count, "images": req.images,
+                },
+                "meta": result.meta, "assessment": assessment,
+                "routing": notes, "fallback_trail": trail,
+                "elapsed_ms": int((time.time() - started) * 1000), "notes": notes_out,
+                "hint": (
+                    "产物已落盘。若后续步骤需要引用它，直接用 files[].path 的绝对路径。"
+                    + ("caption 字段即文字描述，可直接用于文字汇报。" if caption_text else "")
+                ),
+            }, args.pretty)
+            return EXIT_OK
+
+        if is_fail_fast():
+            stop_reason = "fail_fast"
+            break
 
     if unsupported and len(unsupported) == len(trail):
         _emit(
@@ -764,9 +710,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 ),
                 "fallback_trail": trail,
                 "routing": notes,
-                "attempted": [m.id for m in attempts],
+                "attempted": attempted_ids,
                 "elapsed_ms": int((time.time() - started) * 1000),
                 "notes": notes_out,
+                "stop_reason": stop_reason or "unsupported",
                 "hint": _unsupported_hint(args.kind),
             },
             args.pretty,
@@ -777,18 +724,22 @@ def cmd_generate(args: argparse.Namespace) -> int:
         {
             "status": "error",
             "kind": args.kind,
-            "error": "所有候选模型都失败了",
+            "error": (
+                "提交结果不确定，已停止后续生成以避免重复计费" if stop_reason == "uncertain"
+                else "首次失败即停，未尝试后续候选" if stop_reason == "fail_fast"
+                else "所有候选模型都失败了"
+            ),
+            "stop_reason": stop_reason or "exhausted",
+            "submission_uncertain": stop_reason == "uncertain",
+            "diagnostic": last_diagnostic,
             "fallback_trail": trail,
             "routing": notes,
-            "attempted": [m.id for m in attempts],
+            "attempted": attempted_ids,
             "elapsed_ms": int((time.time() - started) * 1000),
             "notes": notes_out,
-            "hint": (
-                "先看 fallback_trail[].error 里「—— 」后面的厂商原文："
-                "Arrearage=账户欠费、InvalidParameter=参数不对、"
-                "ModelNotOpen=模型未开通，这些重试和换 Key 都没用。"
-                "没有厂商原文时，再用 `list` 确认 api_key_ready，"
-                "或在 `web` 页面点「测试连通性」验密钥。"
+            "hint": last_diagnostic.get("hint") or (
+                "先看 fallback_trail 中的错误与厂商原文；密钥就绪仅表示已配置，"
+                "不保证模型可用。可在 web 中先做免费预检，再明确确认真实测试。"
             ),
         },
         args.pretty,
@@ -950,6 +901,7 @@ def build_parser() -> argparse.ArgumentParser:
     def add_routing_flags(p: argparse.ArgumentParser) -> None:
         p.add_argument("--kind", required=True, choices=list(MODEL_KINDS), help="要生成哪类媒体")
         p.add_argument("--supports", help="能力过滤，逗号分隔，如 text2img,img2img")
+        p.add_argument("--fail-fast", action="store_true", help="首次失败即停：不重试HTTP、不切换候选、不内置委托；正常任务轮询不受影响")
         p.add_argument("--image", action="append", help="输入图片（本地路径或 URL），可重复")
         p.add_argument(
             "--model",
@@ -974,7 +926,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="产物落盘的**根**目录，默认 ./outputs（当前工作区）；"
         "实际写入 <根>/image 或 <根>/video",
     )
-    p_gen.add_argument("--max-attempts", type=int, default=None, help="最多尝试几个候选模型")
+    p_gen.add_argument("--max-attempts", type=int, default=None, help="第三方候选预算，不控制HTTP重试，默认不含内置兜底；首次失败即停用 --fail-fast")
     p_gen.add_argument("--no-download", action="store_true", help="只拿远程 URL，不下载")
     p_gen.add_argument(
         "--param", action="append", help="透传给 provider 的额外参数，key=value，可重复"

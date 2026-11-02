@@ -27,6 +27,7 @@ import secrets
 import socket
 import sys
 import threading
+import time
 import webbrowser
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,6 +36,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import catalog, config, probe, store
+from .transport import execution_policy
 
 ASSETS_DIR = config.SKILL_DIR / "assets"
 PAGE_FILE = ASSETS_DIR / "config.html"
@@ -205,6 +207,12 @@ class ConfigApi:
     def vendor_test(
         self, _query: dict[str, list[str]], body: dict[str, Any]
     ) -> dict[str, Any]:
+        with execution_policy(fail_fast=body.get("fail_fast") is True):
+            return self._vendor_test(_query, body)
+
+    def _vendor_test(
+        self, _query: dict[str, list[str]], body: dict[str, Any]
+    ) -> dict[str, Any]:
         cfg = self._config()
         kind = str(body.get("kind") or "image")
         target = self._target_from_payload(body)
@@ -371,6 +379,18 @@ class ConfigApi:
     def model_test(
         self, _query: dict[str, list[str]], body: dict[str, Any]
     ) -> dict[str, Any]:
+        deep = body.get("deep", False)
+        if not isinstance(deep, bool):
+            raise ApiError("deep 必须是 JSON 布尔值 true 或 false；缺省为免费预检")
+        started = time.monotonic()
+        with execution_policy(fail_fast=body.get("fail_fast") is True):
+            result = self._model_test(_query, body)
+        result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        return result
+
+    def _model_test(
+        self, _query: dict[str, list[str]], body: dict[str, Any]
+    ) -> dict[str, Any]:
         """连通性测试，两种模式：
 
         - 默认（轻量）：只调只读端点验接口可达与密钥，不生成、不花钱。
@@ -398,7 +418,7 @@ class ConfigApi:
             }
         )
 
-        if not body.get("deep"):
+        if body.get("deep", False) is False:
             return probe.probe_target(
                 cfg, target, kind=kind, model_name=model_name
             ).to_dict()

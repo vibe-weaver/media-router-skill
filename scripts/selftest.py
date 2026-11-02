@@ -89,7 +89,7 @@ class Handler(BaseHTTPRequestHandler):
             except (json.JSONDecodeError, UnicodeDecodeError):
                 POSTED_BODIES.append({"_raw": raw.decode("utf-8", "replace")})
         if self.path == "/fail":
-            self._raw(404, b'{"error":"model unavailable"}')
+            self._raw(404, b'{"code":"ModelNotFound","message":"model does not exist"}')
             return
         if self.path == "/submit":
             self._json({"data": {"task_id": "selftest-task"}})
@@ -302,8 +302,8 @@ def main() -> int:
     trail = payload.get("fallback_trail") or []
     check("降级轨迹记录了 mock-broken", any(t.get("model") == "mock-broken" for t in trail), str(trail))
     check(
-        "失败被归类为 runtime（计入熔断）",
-        any(t.get("kind") == "runtime" for t in trail),
+        "明确模型不存在归类为 config（不计入熔断）",
+        any(t.get("kind") == "config" for t in trail),
         str([t.get("kind") for t in trail]),
     )
 
@@ -328,8 +328,8 @@ def main() -> int:
     broken = health.state("mock-broken")
     working = health.state("mock-working")
     check(
-        "失败模型计数 +1",
-        broken.get("failure_count") == 1,
+        "明确配置拒绝不累计模型失败计数",
+        not broken.get("failure_count"),
         str(broken.get("failure_count")),
     )
     check(

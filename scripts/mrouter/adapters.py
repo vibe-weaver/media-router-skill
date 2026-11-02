@@ -24,6 +24,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import ConfigError, ModelSpec, RouterConfig
+from .outcomes import _safe_effective_spec
+from .lifecycle import (
+    GenerationInterrupted, generation_attempt, submission_started, submission_received,
+    submission_rejected, task_accepted, outputs_received, file_completed,
+)
 from .transport import (
     HttpError,
     PollTimeout,
@@ -32,6 +37,56 @@ from .transport import (
     read_upload,
     request,
 )
+
+def _reject_response(payload):
+    """仅已确认的业务拒绝解除未确认状态；200 上游故障不能证明没执行。"""
+    from .diagnostics import diagnose_error
+    if isinstance(payload, dict):
+        code = payload.get("code") or payload.get("error_code")
+        message = payload.get("message") or payload.get("msg")
+        error = payload.get("error")
+        if isinstance(error, dict):
+            code = code or error.get("code")
+            message = message or error.get("message")
+        elif isinstance(error, str):
+            message = message or error
+        evidence = {"code": code, "message": message}
+        diagnostic = diagnose_error(HttpError("厂商提交响应", body=json.dumps(evidence, ensure_ascii=False)))
+        has_result = any(payload.get(key) for key in (
+            "data", "output", "images", "video", "video_result", "id", "task_id",
+            "request_id", "status_url", "response_url"))
+        if diagnostic["kind"] == "config" and not has_result:
+            submission_rejected()
+            return True
+    return False
+
+
+class _SubmissionResponse:
+    def __init__(self, response):
+        self.response = response
+
+    def __getattr__(self, name):
+        return getattr(self.response, name)
+
+    def json(self):
+        payload = self.response.json()
+        if _reject_response(payload):
+            from .diagnostics import diagnose_error
+            error = HttpError("厂商明确拒绝生成请求", getattr(self.response, "status", None),
+                              json.dumps(payload, ensure_ascii=False))
+            diagnostic = diagnose_error(error)
+            raise HttpError("厂商明确拒绝生成请求：" + diagnostic["error_code"] +
+                            " " + diagnostic["detail"], error.status, error.body)
+        return payload
+
+
+def _submit(method: str, url: str, **kwargs):
+    """仅生成提交调用此边界；上传输入和任务查询不创建新的生成证据。"""
+    submission_started()
+    response = request(method, url, generation_submission=True, **kwargs)
+    submission_received()
+    return _SubmissionResponse(response)
+
 
 # ---------------------------------------------------------------- 数据结构
 
@@ -77,7 +132,7 @@ class Ctx:
     log: Callable[[str], None] = lambda _msg: None
 
 
-class DownloadError(HttpError):
+class DownloadError(GenerationInterrupted):
     """产物已经生成（多半也已经计费），只是下载/落盘这一步失败。
 
     这类错误**不是模型故障**：换一个模型重跑等于再花一次钱，而上一单的结果
@@ -92,9 +147,7 @@ class DownloadError(HttpError):
         files: list[str] | None = None,
         status: int | None = None,
     ) -> None:
-        super().__init__(message, status)
-        self.urls = list(urls or [])
-        self.files = list(files or [])
+        super().__init__(message, status=status, files=files, urls=urls, phase="delivery")
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -172,11 +225,13 @@ def _fetch_to_local(
     ext = _ext_from_url(url, default_ext)
     dest = _unique_path(out_dir / f"{stem}_{index:02d}{ext}")
     download(url, dest, headers=headers, timeout=300.0)
+    file_completed(dest)
     head = dest.read_bytes()[:32]
     actual = sniff_extension(head)
     if actual and actual != ext:
         renamed = _unique_path(dest.with_suffix(actual))
         dest.replace(renamed)
+        file_completed(renamed, replaces=dest)
         dest = renamed
     if dest.suffix.lower() == ".wav":
         _repair_wav_sizes(dest)
@@ -268,8 +323,10 @@ def _write_media_bytes(
     data: bytes, ext: str, out_dir: Path, stem: str, index: int
 ) -> Path:
     dest = _unique_path(out_dir / f"{stem}_{index:02d}{ext}")
+    outputs_received(inline=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
+    file_completed(dest)
     if ext == ".wav":
         _repair_wav_sizes(dest)
     return dest
@@ -465,11 +522,12 @@ def _finalize(
     """统一下载产物并组装结果。"""
     stem = f"{req.kind}_{_safe(spec.id)}_{time.strftime('%Y%m%d_%H%M%S')}"
     files: list[str] = []
+    outputs_received(urls)
     if out_dir is not None:
         for idx, url in enumerate(urls, start=1):
             try:
                 files.append(str(_fetch_to_local(url, out_dir, stem, idx, req.kind, headers)))
-            except HttpError as exc:
+            except Exception as exc:
                 # 关键区分：这里是「东西已经生成了、只是没下下来」。
                 # 上层据此不熔断、不换模型重跑，并把 urls 原样交回去。
                 raise DownloadError(
@@ -699,6 +757,69 @@ def _passthrough_inputs(
     return merged
 
 
+# 只记录最终已合并的输出规格，不回写 payload，也不复制原始请求/认证信息。
+_OUTPUT_SIZE_FIELDS = ("size", "image_size", "width", "height", "aspect_ratio", "ratio", "resolution")
+
+
+def _output_source(spec: ModelSpec, req: GenRequest, key: str, *,
+                   passthrough: bool = False, template: bool = False) -> str:
+    if passthrough and isinstance(req.extra.get("inputs"), dict) and key in req.extra["inputs"]:
+        return f"extra.inputs.{key}"
+    if key in req.extra and (passthrough or req.extra[key] not in (None, "")):
+        return f"extra.{key}"
+    if passthrough and isinstance(spec.options.get("inputs"), dict) and key in spec.options["inputs"]:
+        return f"options.inputs.{key}"
+    if key in spec.params:
+        return f"params.{key}"
+    if passthrough and key == "aspect_ratio" and req.aspect_ratio:
+        return "request.aspect_ratio"
+    return f"template.{key}" if template else "unverified"
+
+
+def _output_spec(values: dict[str, Any], spec: ModelSpec, req: GenRequest, *,
+                 sources: dict[str, str] | None = None, passthrough: bool = False,
+                 template: bool = False, duration_source: str = "platform_default",
+                 duration_field: str = "duration", duration_seconds_known: bool = True) -> dict[str, Any]:
+    raw: dict[str, Any] = {}
+    sources = sources or {}
+    for key in _OUTPUT_SIZE_FIELDS:
+        if key in values and values[key] not in (None, ""):
+            raw[key] = values[key]
+            raw[key + "_source"] = sources.get(key) or _output_source(
+                spec, req, key, passthrough=passthrough, template=template)
+    raw["size_status"] = "explicit" if raw else "platform_default"
+    if req.kind == "video":
+        raw["duration_seconds"] = values.get(duration_field) if duration_seconds_known else None
+        raw["duration_source"] = duration_source
+        raw["duration_field"] = duration_field
+    safe = _safe_effective_spec(raw)
+    if req.kind == "video" and safe.get("duration_seconds") is None and duration_field in values:
+        safe["duration_source"] = "unverified"
+    return safe
+
+
+def _passthrough_output_spec(spec: ModelSpec, req: GenRequest, values: dict[str, Any]) -> dict[str, Any]:
+    field = spec.options.get("duration_field", "duration")
+    if field is None or field is True:
+        field = "duration"
+    disabled = field is False or str(field).strip().lower() in ("", "none", "false", "null", "-", "off")
+    field = "" if disabled else str(field).strip()
+    source = "disabled" if disabled else "platform_default"
+    seconds_known = field == "duration"
+    if field and field != "duration":
+        source = "unverified"  # 字段映射不等于单位换算，尤其 num_frames 绝不是秒。
+    elif "duration" in values:
+        field = "duration"
+        seconds_known = True
+        source = _output_source(spec, req, field, passthrough=True)
+        nested = req.extra.get("inputs")
+        named = field in req.extra or isinstance(nested, dict) and field in nested
+        if not disabled and req.duration and req.kind == "video" and not named:
+            source = "request.duration"
+    return _output_spec(values, spec, req, passthrough=True, duration_source=source,
+                        duration_field=field, duration_seconds_known=seconds_known)
+
+
 # ---------------------------------------------------------------- native
 
 
@@ -840,12 +961,23 @@ def _gen_openai_video(
         log=ctx.log,
     )
 
+    duration_source = "platform_default"
+    if "duration" in body:
+        duration_source = ("extra.duration" if req.extra.get("duration") not in (None, "") else
+                           "request.duration" if duration else "params.duration")
+    size_source = _output_source(spec, req, "size") if "size" in body else "unverified"
+    if req_size and "size" not in spec.params and req.extra.get("size") in (None, ""):
+        size_source = "request.size" if req.size else "request.aspect_ratio"
+    effective_spec = _output_spec(body, spec, req, sources={"size": size_source},
+                                  duration_source=duration_source)
+
     ctx.log(f"[openai] video submit -> {url}")
     payload = (
-        request("POST", url, headers=headers, json_body=body, timeout=ctx.timeout).json()
+        _submit("POST", url, headers=headers, json_body=body, timeout=ctx.timeout).json()
         or {}
     )
     if isinstance(payload, dict) and payload.get("error"):
+        _reject_response(payload)
         # OpenAI 风格的 error 是 {"message": …}，直接 str 出来是一坨 dict，
         # 用户得自己从花括号里找那句话。能取到 message 就只给 message。
         raise HttpError(
@@ -861,12 +993,13 @@ def _gen_openai_video(
             _dig(payload, "video_result") or _dig(payload, "data")
         )
         if found:
-            return _finalize(spec, req, found, req.output_dir)
+            return _finalize(spec, req, found, req.output_dir, extra_meta={"effective_spec": effective_spec})
         raise HttpError(
             f"未拿到任务 id：{json.dumps(payload, ensure_ascii=False)[:300]}"
         )
 
     poll_url = f"{task_base}/async-result/{task_id}"
+    task_accepted(task_id, poll_url)
 
     def probe() -> list[str] | None:
         data = (
@@ -884,6 +1017,10 @@ def _gen_openai_video(
                 or _dig(data, "output.message")
                 or json.dumps(data, ensure_ascii=False)[:200]
             )
+            failed_urls = _collect_urls_from_items(data.get("video_result") or _dig(data, "data"))
+            failed_single = _dig(data, "output.video_url") or _dig(data, "video.url") or _dig(data, "url")
+            outputs_received(failed_urls or ([failed_single] if failed_single else []), completed=False)
+            submission_rejected()
             raise HttpError(f"任务失败：{reason}")
         found = _collect_urls_from_items(
             data.get("video_result") or _dig(data, "data")
@@ -902,7 +1039,8 @@ def _gen_openai_video(
 
     ctx.log(f"[openai] video task {task_id} 已提交，开始轮询")
     urls = poll(probe, interval=ctx.poll_interval, max_seconds=ctx.max_poll, log=ctx.log)
-    return _finalize(spec, req, urls, req.output_dir, extra_meta={"task_id": task_id})
+    return _finalize(spec, req, urls, req.output_dir,
+                     extra_meta={"task_id": task_id, "effective_spec": effective_spec})
 
 
 OPENAI_SPEECH = "https://api.openai.com/v1/audio/speech"
@@ -1014,7 +1152,7 @@ def _gen_openai_audio(
     for index in range(1, max(1, int(req.count or 1)) + 1):
         if (req.count or 1) > 1:
             ctx.log(f"[openai-speech] 第 {index}/{int(req.count)} 段…")
-        resp = request(
+        resp = _submit(
             "POST", url,
             headers={"Authorization": f"Bearer {ctx.api_key}"},
             json_body=payload, timeout=ctx.timeout,
@@ -1022,11 +1160,13 @@ def _gen_openai_audio(
         data = resp.body or b""
         if not data:
             raise HttpError("语音接口返回了空响应体")
-        if data[:1] in (b"{", b"["):
+        if data.lstrip()[:1] in (b"{", b"["):
+            resp.json()  # 明确拒绝走统一诊断；未知 2xx JSON 仍保持受理未确认。
             raise HttpError(
                 "语音接口返回的是 JSON 而不是音频（多半是网关报错但状态码是 200）："
-                + data[:200].decode("utf-8", "replace")
+                + data[:200].decode("utf-8", "replace"), body=data.decode("utf-8", "replace")
             )
+        outputs_received(inline=True)
         # 扩展名优先按真实文件头；认不出来时按声明的格式推，
         # 不能一律 .mp3 —— 智谱只收 wav/pcm，pcm 是裸采样、存成 .mp3 谁也不知道该怎么放。
         ext = sniff_extension(data[:32]) or {
@@ -1035,6 +1175,7 @@ def _gen_openai_audio(
         dest = _unique_path(Path(req.output_dir) / f"{stem}_{index:02d}{ext}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
+        file_completed(dest)
         if ext == ".wav":
             _repair_wav_sizes(dest)
         files.append(str(dest))
@@ -1098,9 +1239,10 @@ def gen_openai(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) ->
         for idx, image in enumerate(req.images[:4]):
             name, data, ctype = read_upload(image)
             files["image" if idx == 0 else f"image[{idx}]"] = (name, data, ctype)
+        effective_spec = _output_spec(form, spec, req)
         ctx.log(f"[openai] edits -> {url}")
         started = _waiting(ctx, "openai-edits")
-        resp = request(
+        resp = _submit(
             "POST", url, headers=headers, form=form, files=files, timeout=ctx.timeout
         )
         _waited(ctx, "openai-edits", started)
@@ -1120,58 +1262,50 @@ def gen_openai(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) ->
             consumed={"size", "quality", "style", "background"},
             log=ctx.log,
         )
+        effective_spec = _output_spec(body, spec, req)
         ctx.log(f"[openai] generations -> {url}")
         started = _waiting(ctx, "openai-image")
-        resp = request("POST", url, headers=headers, json_body=body, timeout=ctx.timeout)
+        resp = _submit("POST", url, headers=headers, json_body=body, timeout=ctx.timeout)
         _waited(ctx, "openai-image", started)
 
     payload = resp.json() or {}
     if isinstance(payload, dict) and payload.get("error"):
+        _reject_response(payload)
         raise HttpError(
             f"provider 返回错误：{payload['error']}",
             None,
             json.dumps(payload, ensure_ascii=False),
         )
 
-    items = payload.get("data") or []
-    urls: list[str] = []
-    local_from_b64: list[str] = []
-    inline_without_dir = False
-    out_dir = req.output_dir
-    stem = f"{req.kind}_{_safe(spec.id)}_{time.strftime('%Y%m%d_%H%M%S')}"
-    for idx, item in enumerate(items, start=1):
-        if not isinstance(item, dict):
-            continue
-        if item.get("url"):
-            urls.append(item["url"])
-        elif item.get("b64_json"):
-            if out_dir is not None:
-                local_from_b64.append(
-                    str(_write_b64_to_local(item["b64_json"], out_dir, stem, idx, req.kind))
-                )
-            else:
-                inline_without_dir = True
+    return _finalize_image_items(spec, req, payload.get("data"), payload, effective_spec)
 
-    if local_from_b64 and not urls:
-        return GenResult(
-            status="ok",
-            model_id=spec.id,
-            provider=spec.provider,
-            files=local_from_b64,
-            urls=[],
-            meta={"model": spec.model or spec.id, "count": len(local_from_b64), "kind": req.kind},
+
+def _finalize_image_items(spec, req, items, payload, effective_spec):
+    """先收齐整个响应的恢复证据，再落盘；混合 URL/内联结果不得静默丢失。"""
+    if isinstance(items, (str, dict)):
+        items = [items]
+    items = items if isinstance(items, list) else []
+    urls = _collect_urls_from_items(items)
+    inline = [(index, item["b64_json"]) for index, item in enumerate(items, start=1)
+              if isinstance(item, dict) and not _collect_urls_from_items(item) and item.get("b64_json")]
+    outputs_received(urls, inline=bool(inline))
+    if inline and req.output_dir is None:
+        # 直接调用适配器的旧 ConfigError 契约保留；run_adapter 会按已有生成证据安全停止。
+        raise ConfigError(
+            "这个接口返回了内联 base64 图片（b64_json），没有可回传的 URL，"
+            "不能和 --no-download 一起完整交付；去掉该参数后需先核对平台任务，"
+            "不要直接重跑。（本次请求平台的计费通常已经发生）"
         )
-    if not urls:
-        if inline_without_dir:
-            # 计费已经发生，但这条通路没有 URL 可回传。这是「用法问题」，
-            # 归 ConfigError：不写健康度、不冷却模型 —— 下次去掉 --no-download 就好。
-            raise ConfigError(
-                "这个接口返回的是内联 base64 图片（b64_json），没有可回传的 URL，"
-                "不能和 --no-download 一起用；去掉该参数即可正常落盘。"
-                "（本次请求平台的计费通常已经发生）"
-            )
-        raise HttpError(f"响应中没有图片数据：{json.dumps(payload)[:300]}")
-    return _finalize(spec, req, urls, out_dir, extra_meta={"usage": payload.get("usage")})
+    stem = f"{req.kind}_{_safe(spec.id)}_{time.strftime('%Y%m%d_%H%M%S')}"
+    files = [str(_write_b64_to_local(value, req.output_dir, stem, index, req.kind))
+             for index, value in inline]
+    if not urls and not files:
+        raise HttpError(f"响应中没有图片数据：{json.dumps(payload, ensure_ascii=False)[:300]}")
+    result = _finalize(spec, req, urls, req.output_dir,
+                       extra_meta={"usage": payload.get("usage"), "effective_spec": effective_spec})
+    result.files = files + result.files
+    result.meta["count"] = len(files) + len(urls)
+    return result
 
 
 # ---------------------------------------------------------------- dashscope
@@ -1244,7 +1378,7 @@ def _gen_dashscope_audio(
     # --count N 对语音同样要生效：之前固定只发一次请求，传了 --count 2 也只得到
     # 一段音频，而 JSON 里的 count 还是 1 —— 用户会以为是平台没返回。
     for _ in range(max(1, int(req.count or 1))):
-        payload = request(
+        payload = _submit(
             "POST", endpoint,
             headers={
                 "Authorization": f"Bearer {ctx.api_key}",
@@ -1268,6 +1402,7 @@ def _gen_dashscope_audio(
                 f"语音接口没返回音频地址：{json.dumps(payload, ensure_ascii=False)[:300]}"
             )
         urls.append(url)
+        outputs_received([url])
         if "duration_seconds" not in meta and audio.get("duration") not in (None, ""):
             try:
                 meta["duration_seconds"] = round(float(audio["duration"]), 2)
@@ -1372,6 +1507,8 @@ def _gen_dashscope_qwen_image(
     if parameters:
         body["parameters"] = parameters
 
+    size_source = ("request.size" if req.size else "request.aspect_ratio") if req_size else _output_source(spec, req, "size")
+    effective_spec = _output_spec(parameters, spec, req, sources={"size": size_source})
     ctx.log(f"[dashscope-qwen] {url}")
     urls: list[str] = []
     started = _waiting(ctx, "dashscope-qwen", hint=f"同步接口，共 {max(1, int(req.count or 1))} 次请求")
@@ -1381,7 +1518,7 @@ def _gen_dashscope_qwen_image(
     for _index in range(total):
         if total > 1:
             ctx.log(f"[dashscope-qwen] 第 {_index + 1}/{total} 张…")
-        payload = request(
+        payload = _submit(
             "POST", url,
             headers={
                 "Authorization": f"Bearer {ctx.api_key}",
@@ -1402,9 +1539,11 @@ def _gen_dashscope_qwen_image(
                 f"qwen-image 未返回图片：{json.dumps(payload, ensure_ascii=False)[:300]}"
             )
         urls.extend(found)
+        outputs_received(found)
     _waited(ctx, "dashscope-qwen", started, f"{len(urls)} 张")
     return _finalize(
-        spec, req, urls, req.output_dir, extra_meta={"sync": True, "requested_count": int(req.count or 1)}
+        spec, req, urls, req.output_dir,
+        extra_meta={"sync": True, "requested_count": int(req.count or 1), "effective_spec": effective_spec}
     )
 
 
@@ -1511,8 +1650,17 @@ def _gen_dashscope_wanx(
         )
         body = {"model": spec.model or spec.id, "input": inputs, "parameters": parameters}
 
+    duration_source = "platform_default"
+    if req.kind == "video" and "duration" in parameters:
+        duration_source = ("extra.duration" if req.extra.get("duration") not in (None, "") else
+                           "request.duration" if duration else "params.duration")
+    size_source = _output_source(spec, req, "size")
+    if req_size and (req.kind == "image" or "size" not in spec.params and req.extra.get("size") in (None, "")):
+        size_source = "request.size" if req.size else "request.aspect_ratio"
+    effective_spec = _output_spec(parameters, spec, req, sources={"size": size_source},
+                                  duration_source=duration_source)
     ctx.log(f"[dashscope] submit -> {url}")
-    payload = request(
+    payload = _submit(
         "POST", url, headers=headers, json_body=body, timeout=ctx.timeout
     ).json() or {}
     task_id = _dig(payload, "output.task_id")
@@ -1527,6 +1675,7 @@ def _gen_dashscope_wanx(
             "请在模型的 options.task_base 里显式写上查询地址的前缀。"
         )
     poll_url = f"{task_base}/tasks/{task_id}"
+    task_accepted(task_id, poll_url)
 
     def probe() -> list[str] | None:
         data = request(
@@ -1536,6 +1685,10 @@ def _gen_dashscope_wanx(
         if status in ("PENDING", "RUNNING", "UNKNOWN", ""):
             return None
         if status in ("FAILED", "CANCELED"):
+            failed_urls = _collect_urls_from_items(_dig(data, "output.results"))
+            single = _dig(data, "output.video_url") or _dig(data, "output.url")
+            outputs_received(failed_urls or ([single] if single else []), completed=False)
+            submission_rejected()
             raise HttpError(
                 f"任务失败：{_dig(data, 'output.message', '') or json.dumps(data)[:200]}"
             )
@@ -1550,7 +1703,7 @@ def _gen_dashscope_wanx(
     ctx.log(f"[dashscope] task {task_id} 已提交，开始轮询")
     urls = poll(probe, interval=ctx.poll_interval, max_seconds=ctx.max_poll, log=ctx.log)
     return _finalize(
-        spec, req, urls, req.output_dir, extra_meta={"task_id": task_id}
+        spec, req, urls, req.output_dir, extra_meta={"task_id": task_id, "effective_spec": effective_spec}
     )
 
 
@@ -1665,7 +1818,7 @@ def _gen_volcengine_audio(
         headers["X-Api-Request-Id"] = f"mr-{int(time.time() * 1000)}-{index}"
 
         ctx.log(f"[volcengine] tts -> {url}（{resource}）")
-        resp = request("POST", url, headers=headers, json_body={"req_params": req_params}, timeout=ctx.timeout)
+        resp = _submit("POST", url, headers=headers, json_body={"req_params": req_params}, timeout=ctx.timeout)
         raw = (resp.body or b"").decode("utf-8", "replace")
 
         pieces: list[bytes] = []
@@ -1694,6 +1847,7 @@ def _gen_volcengine_audio(
         if not data:
             detail = errors[0] if errors else raw[:200]
             raise HttpError(f"火山语音没有返回音频数据：{detail}")
+        outputs_received(inline=True)
         ext = sniff_extension(data[:32]) or _VOLC_EXT.get(fmt, f".{fmt}")
         files.append(str(_write_media_bytes(data, ext, req.output_dir, stem, index)))
 
@@ -1746,8 +1900,19 @@ def gen_volcengine(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
             content.append(
                 {"type": "image_url", "image_url": {"url": _image_value(req.images[0])}}
             )
+        # 只快照已发送的白名单旗标；重复/未知 --dur 不猜平台覆盖顺序。
+        effective_spec = _output_spec(
+            {"duration": duration, "ratio": ratio,
+             **{key: extra_flags[key] for key in _OUTPUT_SIZE_FIELDS if key in extra_flags}}, spec, req,
+            sources={"ratio": "request.aspect_ratio" if req.aspect_ratio else "params.ratio"},
+            duration_source="unverified" if "dur" in extra_flags else
+                            "request.duration" if req.duration else "params.duration" if duration else "platform_default",
+            duration_seconds_known="dur" not in extra_flags,
+        )
+        if "duration_field" in effective_spec:
+            effective_spec["duration_field"] = "--dur"
         ctx.log(f"[volcengine] video submit -> {url}")
-        payload = request(
+        payload = _submit(
             "POST",
             url,
             headers=headers,
@@ -1759,6 +1924,7 @@ def gen_volcengine(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
             raise HttpError(f"未拿到任务 id：{json.dumps(payload, ensure_ascii=False)[:300]}")
 
         poll_url = f"{url.rstrip('/')}/{task_id}"
+        task_accepted(task_id, poll_url)
 
         def probe() -> list[str] | None:
             data = request("GET", poll_url, headers=headers, timeout=60).json() or {}
@@ -1766,6 +1932,10 @@ def gen_volcengine(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
             if status in ("queued", "running", "pending", ""):
                 return None
             if status in ("failed", "cancelled", "canceled"):
+                failed_urls = _collect_urls_from_items(_dig(data, "content"))
+                single = _dig(data, "content.video_url")
+                outputs_received(failed_urls or ([single] if single else []), completed=False)
+                submission_rejected()
                 raise HttpError(
                     f"任务失败：{data.get('error') or json.dumps(data, ensure_ascii=False)[:200]}"
                 )
@@ -1779,7 +1949,8 @@ def gen_volcengine(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
 
         ctx.log(f"[volcengine] task {task_id} 已提交，开始轮询")
         urls = poll(probe, interval=ctx.poll_interval, max_seconds=ctx.max_poll, log=ctx.log)
-        return _finalize(spec, req, urls, req.output_dir, extra_meta={"task_id": task_id})
+        return _finalize(spec, req, urls, req.output_dir,
+                         extra_meta={"task_id": task_id, "effective_spec": effective_spec})
 
     url = spec.endpoint or ARK_IMAGE
     if req.images:
@@ -1799,44 +1970,14 @@ def gen_volcengine(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
         consumed={"size", "response_format", "watermark", "guidance_scale", "seed"},
         log=ctx.log,
     )
+    effective_spec = _output_spec(body, spec, req)
     ctx.log(f"[volcengine] image -> {url}")
     started = _waiting(ctx, "volcengine-image")
-    payload = request(
+    payload = _submit(
         "POST", url, headers=headers, json_body=body, timeout=ctx.timeout
     ).json() or {}
     _waited(ctx, "volcengine-image", started)
-    data_items = payload.get("data") or []
-    urls = _collect_urls_from_items(data_items)
-    if not urls:
-        b64_items = [
-            item.get("b64_json")
-            for item in data_items
-            if isinstance(item, dict) and item.get("b64_json")
-        ]
-        if b64_items and req.output_dir is not None:
-            stem = f"{req.kind}_{_safe(spec.id)}_{time.strftime('%Y%m%d_%H%M%S')}"
-            files = [
-                str(_write_b64_to_local(v, req.output_dir, stem, i, req.kind))
-                for i, v in enumerate(b64_items, start=1)
-            ]
-            return GenResult(
-                status="ok",
-                model_id=spec.id,
-                provider=spec.provider,
-                files=files,
-                meta={"model": spec.model or spec.id, "count": len(files), "kind": req.kind},
-            )
-        if b64_items:
-            # 同 openai 分支：计费已发生但没有 URL，属用法问题，不写健康度
-            raise ConfigError(
-                "这个接口返回的是内联 base64 图片（b64_json），没有可回传的 URL，"
-                "不能和 --no-download 一起用；去掉该参数即可正常落盘。"
-                "（本次请求平台的计费通常已经发生）"
-            )
-        raise HttpError(f"响应中没有图片数据：{json.dumps(payload, ensure_ascii=False)[:300]}")
-    if body.get("response_format") == "b64_json":
-        pass
-    return _finalize(spec, req, urls, req.output_dir, extra_meta={"usage": payload.get("usage")})
+    return _finalize_image_items(spec, req, payload.get("data"), payload, effective_spec)
 
 
 # ---------------------------------------------------------------- kling
@@ -1969,10 +2110,11 @@ def _gen_kling_audio(
     extra: dict[str, Any] = {}
     for _ in range(max(1, int(req.count or 1))):
         ctx.log(f"[kling] tts submit -> {base}")
-        payload = request(
+        payload = _submit(
             "POST", base, headers=headers, json_body=body, timeout=ctx.timeout
         ).json() or {}
         if payload.get("code") not in (0, None):
+            _reject_response(payload)
             raise HttpError(
                 f"可灵返回错误 {payload.get('code')}: {payload.get('message')}",
                 None,
@@ -1983,6 +2125,7 @@ def _gen_kling_audio(
             raise HttpError(f"未拿到 task_id：{json.dumps(payload, ensure_ascii=False)[:300]}")
 
         poll_url = f"{base}/{task_id}"
+        task_accepted(task_id, poll_url)
         info: dict[str, Any] = {}
 
         def probe() -> list[str] | None:
@@ -1991,6 +2134,8 @@ def _gen_kling_audio(
             if status in ("submitted", "processing", "queued", ""):
                 return None
             if status == "failed":
+                outputs_received(_collect_urls_from_items(_dig(data, "data.task_result.audios")), completed=False)
+                submission_rejected()
                 raise HttpError(
                     f"任务失败：{_dig(data, 'data.task_status_msg', '') or json.dumps(data)[:200]}"
                 )
@@ -2011,7 +2156,9 @@ def _gen_kling_audio(
             return found
 
         ctx.log(f"[kling] tts task {task_id} 已提交，开始轮询")
-        urls.extend(poll(probe, interval=ctx.poll_interval, max_seconds=ctx.max_poll, log=ctx.log))
+        completed_urls = poll(probe, interval=ctx.poll_interval, max_seconds=ctx.max_poll, log=ctx.log)
+        urls.extend(completed_urls)
+        outputs_received(completed_urls)
         for key, value in info.items():
             extra.setdefault(key, value)
         extra.setdefault("task_id", task_id)
@@ -2070,11 +2217,22 @@ def gen_kling(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> 
         )
         poll_base = url
 
+    duration_source = "platform_default"
+    if req.kind == "video" and "duration" in body:
+        duration_source = _output_source(spec, req, "duration")
+        if duration_source == "unverified" and req.duration:
+            duration_source = "request.duration"
+    ratio_source = _output_source(spec, req, "aspect_ratio")
+    if req.aspect_ratio and "aspect_ratio" not in spec.params and req.extra.get("aspect_ratio") in (None, ""):
+        ratio_source = "request.aspect_ratio"
+    effective_spec = _output_spec(body, spec, req, sources={"aspect_ratio": ratio_source},
+                                  duration_source=duration_source)
     ctx.log(f"[kling] submit -> {url}")
-    payload = request(
+    payload = _submit(
         "POST", url, headers=headers, json_body=body, timeout=ctx.timeout
     ).json() or {}
     if payload.get("code") not in (0, None):
+        _reject_response(payload)
         # 带上 body：CLI 靠 body 里的 code 判断「欠费 / 余额不足」这类配置错误
         # （可灵 1102），没有它就只能当模型故障打进冷却。
         raise HttpError(
@@ -2087,6 +2245,7 @@ def gen_kling(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> 
         raise HttpError(f"未拿到 task_id：{json.dumps(payload, ensure_ascii=False)[:300]}")
 
     poll_url = f"{poll_base.rstrip('/')}/{task_id}"
+    task_accepted(task_id, poll_url)
 
     def probe() -> list[str] | None:
         data = request("GET", poll_url, headers=headers, timeout=60).json() or {}
@@ -2094,6 +2253,9 @@ def gen_kling(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> 
         if status in ("submitted", "processing", "queued", ""):
             return None
         if status == "failed":
+            failed_result = _dig(data, "data.task_result") or {}
+            outputs_received(_collect_urls_from_items(failed_result.get("videos") or failed_result.get("images")), completed=False)
+            submission_rejected()
             raise HttpError(
                 f"任务失败：{_dig(data, 'data.task_status_msg', '') or json.dumps(data)[:200]}"
             )
@@ -2107,7 +2269,8 @@ def gen_kling(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> 
 
     ctx.log(f"[kling] task {task_id} 已提交，开始轮询")
     urls = poll(probe, interval=ctx.poll_interval, max_seconds=ctx.max_poll, log=ctx.log)
-    return _finalize(spec, req, urls, req.output_dir, extra_meta={"task_id": task_id})
+    return _finalize(spec, req, urls, req.output_dir,
+                     extra_meta={"task_id": task_id, "effective_spec": effective_spec})
 
 
 # ---------------------------------------------------------------- replicate
@@ -2143,16 +2306,21 @@ def gen_replicate(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx)
         url = spec.endpoint or f"{REPLICATE_BASE}/models/{spec.model or spec.id}/predictions"
         body = {"input": inputs}
 
+    effective_spec = _passthrough_output_spec(spec, req, inputs)
     ctx.log(f"[replicate] submit -> {url}")
-    payload = request(
+    payload = _submit(
         "POST", url, headers=headers, json_body=body, timeout=ctx.timeout
     ).json() or {}
     status = str(payload.get("status") or "").lower()
-    if status == "failed":
+    get_url = (payload.get("urls") or {}).get("get") or ""
+    if payload.get("id") or get_url:
+        task_accepted(payload.get("id") or "", get_url)
+    if status in ("failed", "canceled"):
+        outputs_received(_collect_urls_from_items(payload.get("output")), completed=False)
+        submission_rejected()
         raise HttpError(f"任务失败：{payload.get('error')}")
 
-    if status not in ("succeeded", "failed", "canceled") and (payload.get("urls") or {}).get("get"):
-        get_url = payload["urls"]["get"]
+    if status not in ("succeeded", "failed", "canceled") and get_url:
 
         def probe() -> list[str] | None:
             data = request("GET", get_url, headers=headers, timeout=60).json() or {}
@@ -2160,6 +2328,8 @@ def gen_replicate(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx)
             if state in ("starting", "processing", ""):
                 return None
             if state in ("failed", "canceled"):
+                outputs_received(_collect_urls_from_items(data.get("output")), completed=False)
+                submission_rejected()
                 raise HttpError(f"任务失败：{data.get('error')}")
             found = _collect_urls_from_items(data.get("output"))
             if not found:
@@ -2173,7 +2343,8 @@ def gen_replicate(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx)
         if not urls:
             raise HttpError(f"响应中没有输出：{json.dumps(payload, ensure_ascii=False)[:300]}")
 
-    return _finalize(spec, req, urls, req.output_dir, extra_meta={"task_id": payload.get("id")})
+    return _finalize(spec, req, urls, req.output_dir,
+                     extra_meta={"task_id": payload.get("id"), "effective_spec": effective_spec})
 
 
 # ---------------------------------------------------------------- fal
@@ -2194,19 +2365,22 @@ def gen_fal(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> Ge
     if req.negative_prompt:
         body.setdefault("negative_prompt", req.negative_prompt)
 
+    effective_spec = _passthrough_output_spec(spec, req, body)
     ctx.log(f"[fal] submit -> {url}")
-    payload = request(
+    payload = _submit(
         "POST", url, headers=headers, json_body=body, timeout=ctx.timeout
     ).json() or {}
     status_url = payload.get("status_url")
     response_url = payload.get("response_url")
+    if payload.get("request_id") or status_url:
+        task_accepted(payload.get("request_id") or "", status_url or "")
     if not status_url or not response_url:
         # 有些端点直接同步返回结果
         urls = _collect_urls_from_items(payload.get("images")) or _collect_urls_from_items(
             payload.get("video")
         )
         if urls:
-            return _finalize(spec, req, urls, req.output_dir)
+            return _finalize(spec, req, urls, req.output_dir, extra_meta={"effective_spec": effective_spec})
         raise HttpError(f"响应缺少 status_url/response_url：{json.dumps(payload)[:300]}")
 
     def probe() -> list[str] | None:
@@ -2215,6 +2389,11 @@ def gen_fal(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> Ge
         if state in ("IN_QUEUE", "IN_PROGRESS", ""):
             return None
         if state not in ("COMPLETED",):
+            if state in ("FAILED", "ERROR", "CANCELED", "CANCELLED"):
+                outputs_received(_collect_urls_from_items(data.get("images")) or
+                                 _collect_urls_from_items(data.get("video")) or
+                                 _collect_urls_from_items(data.get("output")), completed=False)
+                submission_rejected()
             raise HttpError(f"任务状态异常：{json.dumps(data, ensure_ascii=False)[:200]}")
         result = request("GET", response_url, headers=headers, timeout=120).json() or {}
         found = (
@@ -2229,7 +2408,8 @@ def gen_fal(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> Ge
     ctx.log("[fal] 开始轮询")
     urls = poll(probe, interval=ctx.poll_interval, max_seconds=ctx.max_poll, log=ctx.log)
     return _finalize(
-        spec, req, urls, req.output_dir, extra_meta={"request_id": payload.get("request_id")}
+        spec, req, urls, req.output_dir,
+        extra_meta={"request_id": payload.get("request_id"), "effective_spec": effective_spec}
     )
 
 
@@ -2344,9 +2524,27 @@ def gen_generic_http(
         _merge_leftover(merged_body, req, "generic_http", log=ctx.log)
 
     method = str(submit.get("method") or "POST").upper()
+    sent_body = merged_body if method in ("POST", "PUT", "PATCH") and isinstance(merged_body, dict) else {}
+    direct_duration = (isinstance(body_template, dict) and
+                       isinstance(body_template.get("duration"), str) and
+                       re.fullmatch(r"\s*\{\{\s*duration\s*\}\}\s*", body_template["duration"]) is not None)
+    duration_source = (_output_source(spec, req, "duration", template=True)
+                       if direct_duration and method in ("POST", "PUT", "PATCH") else "unverified")
+    effective_spec = _output_spec(
+        sent_body, spec, req, template=True, duration_source=duration_source,
+        duration_seconds_known=direct_duration and method in ("POST", "PUT", "PATCH"),
+    )
+    unknown_size_structure = (not isinstance(merged_body, dict) or any(
+        isinstance(value, (dict, list)) and key not in ("size", "image_size")
+        for key, value in sent_body.items()
+    ))
+    if (method not in ("POST", "PUT", "PATCH") or unknown_size_structure or
+            (effective_spec.get("size_status") == "platform_default" and
+             (req.size or req.aspect_ratio))):
+        effective_spec["size_status"] = "unverified"
     submit_url = str(_render(submit_url, variables))
     ctx.log(f"[generic_http] {method} {submit_url}")
-    payload = request(
+    payload = _submit(
         method,
         submit_url,
         headers=submit_headers,
@@ -2378,7 +2576,7 @@ def gen_generic_http(
                 f"（响应：{json.dumps(payload, ensure_ascii=False)[:300]}）\n"
                 + _generic_http_help(spec, "options.result_path / options.result_url_field")
             )
-        return _finalize(spec, req, urls, req.output_dir)
+        return _finalize(spec, req, urls, req.output_dir, extra_meta={"effective_spec": effective_spec})
 
     # task_id_path 必须先有，再去取值。
     # 少了这一步，_dig(payload, None) 会把**整个响应**当成 task_id 返回
@@ -2396,9 +2594,10 @@ def gen_generic_http(
             f"响应前 200 字：{json.dumps(payload, ensure_ascii=False)[:200]}"
         )
     poll_url_template = pl.get("url")
+    poll_url = str(_render(poll_url_template, {**variables, "task_id": task_id})) if poll_url_template else ""
+    task_accepted(task_id, poll_url)
     if not poll_url_template:
         raise ConfigError(_generic_http_help(spec, "options.poll.url"))
-    poll_url = str(_render(poll_url_template, {**variables, "task_id": task_id}))
     poll_method = str(pl.get("method") or "GET").upper()
     poll_headers = {str(k): str(v) for k, v in (pl.get("headers") or {}).items()}
     poll_params: dict[str, Any] = dict(pl.get("params") or {})
@@ -2420,6 +2619,11 @@ def gen_generic_http(
         ).json() or {}
         state = str(_dig(data, status_path, "") or "").lower()
         if state in failure:
+            failed_urls = _collect_urls_from_items(_dig(data, result_path), url_field)
+            if not failed_urls and not result_path:
+                failed_urls = _find_urls_deep(data)
+            outputs_received(failed_urls, completed=False)
+            submission_rejected()
             raise HttpError(f"任务失败：{json.dumps(data, ensure_ascii=False)[:200]}")
         if status_path and state not in success:
             return None
@@ -2439,7 +2643,8 @@ def gen_generic_http(
         max_seconds=ctx.max_poll,
         log=ctx.log,
     )
-    return _finalize(spec, req, urls, req.output_dir, extra_meta={"task_id": task_id})
+    return _finalize(spec, req, urls, req.output_dir,
+                     extra_meta={"task_id": task_id, "effective_spec": effective_spec})
 
 
 # ---------------------------------------------------------------- 注册与派发
@@ -2536,7 +2741,8 @@ def run_adapter(
             f"但 generate --kind {req.kind} 暂时不可用。",
             kind=req.kind,
         )
-    return adapter(spec, req, cfg, ctx)
+    with generation_attempt():
+        return adapter(spec, req, cfg, ctx)
 
 
 __all__ = [

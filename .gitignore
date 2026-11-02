@@ -1,62 +1,49 @@
-# ============================================================================
-# media-router 忽略规则
-#
-# 这个文件是「承诺」的兑现：config/secrets.example.yaml、models.web.example.yaml、
-# README、references/setup.md 里都写着「已在 .gitignore 里」，但仓库里一直没有它。
-# 少了这个文件，你在项目目录里 git init 之后，第一发 commit 就会把明文 API Key
-# 一起推上去 —— 而且 .gitignore 对**已经入库**的文件无效，改起来要重写历史。
-#
-# 打包脚本 tools/build_pack.py 里另有一套独立的密钥白名单（SECRET_PATTERNS），
-# 两处都要守：这里管 git，那里管 zip。
-# ============================================================================
-
-# ---- 密钥（明文，绝对不能入库）----
+# 密钥与个人配置（.gitignore 不会清除本地文件，也不影响已跟踪文件）
 config/secrets.yaml
+config/secrets.yml
 config/secrets.web.yaml
-# 手写层/页面层可能被编辑器留下的备份，同样含明文
-config/*.local-backup
+config/secrets.web.yml
+config/secrets.json
+config/secrets.web.json
+config/secrets*.yml
+config/models.web.yaml
+config/models.web.yml
+config/models.web.json
+config/*.local-backup*
 config/*.bak
 config/*.orig
 config/*.rej
-config/secrets*.yml
-*.pem
-*.key
-*.p12
-*.pfx
 .env
 .env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
 
-# ---- 配置页写出的本机状态（不含密钥，但属于机器本地，不该共享）----
-config/models.web.yaml
-config/models.web.yml
-
-# ---- 运行时产物与状态 ----
-# outputs/ 里是真生成的图片/视频/音频，几十 MB，且可能含提示词
-outputs/
-# state/ 里是熔断计数和失败记录（含厂商返回的报错原文）
+# 运行状态、生成媒体与发行产物
 state/
+outputs/
 dist/
+*.part
+*.local-backup*
 
-# ---- Python ----
+# Python 与编辑器缓存
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
-
-# ---- 编辑器 / 系统 ----
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# ---- 临时文件 / 日志 ----
+# 临时文件与本机 agent 开发记录
 *.log
 *.err
 *.tmp
 ~$*
-
-# ---- agent 开发记忆（含本机路径与调试细节，不入库）----
 .workbuddy/
-
+docs/superpowers/

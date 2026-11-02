@@ -66,7 +66,8 @@ class HealthStore:
         raw.setdefault("schema_version", SCHEMA_VERSION)
         self._data = raw
 
-    def save(self) -> None:
+    def save(self) -> bool:
+        """保存状态；失败不抛出，但允许调用方提示本次未持久化。"""
         tmp: Path | None = None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,6 +78,7 @@ class HealthStore:
                 json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             tmp.replace(self.path)
+            return True
         except OSError:
             # 状态写入失败不应让整个生成流程失败
             if tmp is not None:
@@ -84,6 +86,7 @@ class HealthStore:
                     tmp.unlink()
                 except OSError:
                     pass
+            return False
 
     # ---------- 查询 ----------
 
@@ -102,7 +105,7 @@ class HealthStore:
 
     # ---------- 更新 ----------
 
-    def record_success(self, model_id: str) -> None:
+    def record_success(self, model_id: str) -> bool:
         entry = self._data["models"].setdefault(model_id, {})
         if not isinstance(entry, dict):  # 兜底：外部写坏过
             entry = {}
@@ -112,7 +115,7 @@ class HealthStore:
         entry["last_error"] = ""
         entry["success_count"] = _as_int(entry.get("success_count")) + 1
         entry["last_success_ts"] = time.time()
-        self.save()
+        return self.save()
 
     def record_failure(
         self, model_id: str, error: str, threshold: int, cooldown_seconds: float
