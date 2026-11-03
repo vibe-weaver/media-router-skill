@@ -226,7 +226,8 @@ def _fetch_to_local(
     dest = _unique_path(out_dir / f"{stem}_{index:02d}{ext}")
     download(url, dest, headers=headers, timeout=300.0)
     file_completed(dest)
-    head = dest.read_bytes()[:32]
+    with dest.open("rb") as stream:
+        head = stream.read(32)
     actual = sniff_extension(head)
     if actual and actual != ext:
         renamed = _unique_path(dest.with_suffix(actual))
