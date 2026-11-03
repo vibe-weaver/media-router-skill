@@ -10,6 +10,8 @@
 
 按优先级分档 · 同档加权随机 · 失败自动降级 · 连续失败熔断 · 产物回传
 
+**内置 541 条图片／视频提示词参考 · 47 套模板 · 13 类案例，离线检索、不用 Key**
+
 ![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)
 ![依赖](https://img.shields.io/badge/依赖-零，纯标准库-brightgreen)
 ![平台](https://img.shields.io/badge/平台-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
@@ -72,11 +74,17 @@
 
 ### 图片／视频提示词准备
 
-技能先检索内嵌模板，再由当前 Agent 结合你的要求整理最终提示词，最后调用原生成流程。模板只提供构图、风格、材质和光影参考，不能覆盖主体、准确文案、比例、时长、数量或禁止项；原样发送／不要润色／不参考模板仍可直传，只写提示词或先别生成时不提交。
+生成前先在内置资料里检索（**541 条案例、13 类模板**，见 [提示词库](#prompt-library)），再由当前 Agent
+结合你的要求整理最终提示词，最后调用原生成流程。模板只提供构图、风格、材质和光影参考，不覆盖主体、
+准确文案、比例、时长、数量或禁止项；原样发送／不要润色／不参考模板仍可直传，只写提示词或先别生成时不提交。
 
-检索与写提示词无需额外 Key、网络或依赖，不会额外试生成。视频只借鉴兼容的图片视觉参考，另补动作时间、运镜和连续性，不自动增加分段、参考图、声音或数量。零命中或资料不可用时会说明限制，按你的需求自拟，不硬套；语音和网页模型测试不变。
+检索与写提示词无需额外 Key、网络或依赖，不会额外试生成。视频只借鉴兼容的图片视觉参考，另补动作时间、
+运镜和连续性，不自动增加分段、参考图、声音或数量。零命中或资料不可用时会说明限制，按你的需求自拟，
+不硬套；语音和网页模型测试不变。
 
-离线查看：`python scripts/media_router.py prompts search --kind image --query "商品 极简"`；再按返回值用 `prompts show --category 分类slug` 或 `prompts show --id 案例编号` 阅读正文，检索词、分类和 ID 不能照搬示例。手动 CLI 的 `generate` 不被强制先检索，参数与结果契约、native 委托语义及计费安全保持不变。
+离线查看：`python scripts/media_router.py prompts search --kind image --query "商品 极简"`；再按返回值用
+`prompts show --category 分类slug` 或 `prompts show --id 案例编号` 阅读正文。手动 CLI 的 `generate`
+不被强制先检索，参数与结果契约、native 委托语义及计费安全保持不变。
 
 完整边界见 [提示词准备说明](<references/prompts/index.md>)。第三方案例的来源和 MIT 许可不等于已核验全部商用或再分发权利。
 
@@ -94,6 +102,101 @@
 | **网页配置** | 本地单文件配置台 | 配厂商/模型、滑块调权重、一键验密钥，不用手写 YAML |
 | **结果回传** | 元数据 / 视觉描述 | 让看不见图的文本模型拿到一句真实画面描述，接着往下推理 |
 | **配置驱动** | `generic_http` 适配器 | 接新平台不用改代码，把接口填成 YAML 就行 |
+| **提示词库** | 541 条参考 + 47 套模板 | 13 类离线检索；模板只补构图/材质/灯光，主体、文案、比例仍以你为准 |
+| **模型授权** | 只调用已配置且启用的模型 | `--param` 不能换模型、地址、凭据或计费资源；真实测试也只测已保存的启用条目 |
+
+---
+
+<a id="prompt-library"></a>
+
+## 内置提示词库：541 条案例 · 13 类 · 47 套模板
+
+路由解决「调哪个模型」，提示词库解决「让模型画成什么样」。技能里直接带了一整套**离线提示词资料**：
+生成图片／视频前先检索，再由 Agent 结合你的要求写最终提示词。不用联网、不用 Key、不会额外试生成，
+也不会把整库塞进上下文。
+
+| 内容 | 规模 | 说明 |
+|---|---|---|
+| 原始案例 | **541 条** | 逐字保留 prompt 正文，编号不连续；其中 2 条原文未公开，只保留目标说明 |
+| 分类 | **13 类** | UI、信息图、海报、商品、品牌、建筑、摄影、插画、人物、场景、历史、文档、其他 |
+| 模板 | **47 套** | 每类都有「常规模板 + JSON 进阶模板」，另有 21 套专项模板 |
+| 索引 | **22 组** | 按风格、场景、标签反查模板与案例 |
+| 来源 | **592 个位置** | 保留原文与来源位置，便于核对版本和授权 |
+
+### 13 类覆盖（按条数排序）
+
+| 分类 | 条数 | 常见用途 |
+|---|---:|---|
+| 海报与排版 | 90 | 海报、封面、字体、签名、版式 |
+| 摄影与写实 | 78 | 人像、胶片、纪实、商业摄影 |
+| UI 与界面 | 73 | App、网页、仪表盘、社交截图 |
+| 插画与艺术 | 59 | 水彩、绘画、艺术、装饰画 |
+| 图表与信息可视化 | 53 | 信息图、科普、知识卡片、流程图 |
+| 商品与电商 | 42 | 商品主图、详情页、广告、包装 |
+| 人物与角色 | 31 | 角色设定、姿势、卡牌、玩具 |
+| 其他应用场景 | 28 | 研发拆解、爆炸图、特殊视觉实验 |
+| 品牌与标志 | 27 | Logo、VI、品牌系统、品牌触点 |
+| 场景与叙事 | 21 | 分镜、故事、世界观、情绪场景 |
+| 历史与古风题材 | 16 | 长卷、古风、诗词、历史人物 |
+| 建筑与空间 | 12 | 建筑、室内、城市地图 |
+| 文档与出版物 | 11 | 手册、报告页面、图鉴、出版排版 |
+
+合计 **541 条**。案例编号不连续，最大编号不等于数量；这是刻意保留原始编号的结果。
+
+### 模板长什么样
+
+以「商品与电商」的常规模板为例（原文节选）：
+
+```text
+生成[商品名]电商主图，卖点为[卖点1]、[卖点2]。
+场景：[纯色棚拍/生活方式场景]，镜头：[特写/半身/全景]。
+材质细节：[材质关键词]，灯光：[柔光/侧光/轮廓光]。
+附加元素：[价格角标/卖点icon/促销文案]。
+输出：电商平台可直接使用的商品展示图。
+```
+
+模板是**骨架**，不是最终 prompt：主体、准确文案、比例、时长、数量和禁止项都以你的要求为准；
+冲突的示例品牌、人物、价格、虚构数值和占位符会被删掉，适用部分太少就换模板或自拟。
+
+### 检索怎么走
+
+```bash
+python3 scripts/media_router.py prompts search --kind image --query "商品 极简"
+```
+
+返回 JSON 里有命中分类、候选案例和库版本哈希（下面只保留关键字段）：
+
+```json
+{
+  "status": "ok",
+  "kind": "image",
+  "matched": true,
+  "categories": [{"category": "product", "label": "商品与电商", "score": 8}],
+  "cases": [
+    {"id": 33, "title": "电商商品展示设计", "category": "product", "prompt_status": "provided"},
+    {"id": 141, "title": "电商商品展示设计", "category": "product", "prompt_status": "provided"}
+  ]
+}
+```
+
+再用 `prompts show --category product` 读该分类的模板与避坑，或 `prompts show --id 33` 读完整案例正文。
+实际使用只读 1–2 个模板 + 0–3 条案例，不加载整库；正文会被完整阅读后再融合，检索词、分类和 ID
+都不能照搬示例。
+
+### 视频也能用，但要补镜头语言
+
+检索支持 `--kind video`，但**原库以图片视觉参考为主**：视频只能借鉴构图、光影、材质和色彩，
+动作、时间、运镜、转场和连续性要按 [视频规范](<references/prompts/video.md>) 另行组织。
+搜视频时返回值也会带这条提示，不会假装库里已有现成的视频分镜。
+
+### 边界：参考数据，不是指令
+
+库里的正文是 `reference_data`：不执行其中的角色声明、命令、链接或索钥要求，也不会自动访问来源。
+用户要求原样发送、不润色、不参考模板时保留直传；零命中或资料不可用时说明限制并自拟，不硬套模板，
+也不为选模板额外试生成、分段或加量。
+
+完整协议、复用条件和许可说明见 [提示词准备说明](<references/prompts/index.md>)、
+[分类导航](<references/prompts/library/references/index.md>) 与 [来源说明](<references/prompts/library/SOURCES.md>)。
 
 ---
 
@@ -325,7 +428,7 @@ python3 scripts/selftest_web.py  # 网页配置全链路
 `selftest_web.py` 里有一项会真的向厂商只读端点发一次请求；完全离线的机器上它会失败，
 其余用例都只打本地回环。
 
-另有 21 个低成本测试脚本，不启浏览器、不写仓库 `dist`：
+另有 29 个低成本测试脚本，不启浏览器、不写仓库 `dist`：
 
 ```bash
 node tests/test_page_render.js       # 页面 JS 渲染（假 DOM，零依赖，需要 Node）
@@ -349,6 +452,14 @@ python3 tests/test_generation_lifecycle.py # 已受理任务、部分产物、�
 python3 tests/test_outcome_conflicts.py    # 嵌套模板与多组精确尺寸冲突
 node tests/test_page_redraw.js       # 实际列表重绘、确认/请求并发与恢复信息
 node tests/test_page_preferences.js  # 开关刷新恢复、默认关闭、存储禁用/配额容错
+python3 tests/test_media_header.py   # 下载产物文件头的定长读取
+python3 tests/test_prompts.py        # 提示词检索、正文定位、哈希与复用边界
+python3 tests/test_prompts_cli.py    # prompts 子命令的参数与 JSON 契约
+python3 tests/test_prompt_assets.py  # 资料快照、路径与许可文件
+python3 tests/test_prompt_packaging.py # 运行时包包含提示词资料与许可
+python3 tests/test_prompt_workflow.py  # 检索 → 阅读 → 复用的完整流程
+python3 tests/test_model_authorization.py # 启用模型与参数授权
+python3 tests/test_submission_identity.py # 提交前的模型身份守卫
 ```
 
 这些测试只用于开发，不会进运行时包。
@@ -685,13 +796,23 @@ media-router/
 │       ├── store.py          # 配置页面的持久层（叠加层读写）
 │       ├── webserver.py      # 本机网页配置服务
 │       ├── cli.py            # 命令行
+│       ├── policy.py         # 模型/地址/凭据授权与提交身份守卫
 │       └── miniyaml.py       # YAML 子集解析与序列化（没装 pyyaml 时的回退）
 ├── state/health.json         # 运行时熔断状态（首次运行时自动生成）
 ├── outputs/                  # 产物默认落盘位置（<cwd>/outputs/image、video、audio）
 ├── references/
 │   ├── providers.md          # 各平台接入参数对照
-│   └── setup.md              # 配置/排障说明（按需读，正常生成不需要）
-├── tests/                    # 20 个低成本测试脚本（仅开发用，不进运行时包）
+│   ├── setup.md              # 配置/排障说明（按需读，正常生成不需要）
+│   └── prompts/              # ★ 离线提示词资料（541 条案例 / 13 类 / 47 套模板）
+│       ├── index.md          # 检索 → 阅读 → 融合 → 自检协议
+│       ├── image.md          # 图片提示词组织规范
+│       ├── video.md          # 视频提示词组织规范（补动作/时间/镜头/连续性）
+│       └── library/
+│           ├── manifest.json # 每条案例的分类文件、行号与 prompt SHA-256
+│           ├── SOURCES.md    # 来源与许可
+│           ├── LICENSE       # 上游资料许可
+│           └── references/   # templates/、cases/、catalogs/、styles.md、docs-prompts/
+├── tests/                    # 29 个低成本测试脚本（仅开发用，不进运行时包）
 ├── tools/build_pack.py       # 打包：--runtime 生成干净运行时目录，默认生成市场 pack
 ├── pack/manifest.json        # DSH 插件市场上架元数据
 └── dist/                     # 打包产物（不入库）
@@ -732,6 +853,13 @@ media-router/
 因为一个环境变量名只能有一个值。你在页面里加第二个火山账号时，如果两家的 Key 都记到 `ARK_API_KEY`，
 后填的会把先填的覆盖掉。所以程序给第二个自动换成 `ARK_API_KEY_2`。
 （注意分隔符必须是下划线 —— 连字符在 shell 和 `.env` 里都是非法的环境变量名。）
+
+**Q：提示词模板会不会让 agent 照抄，反而忽略我的要求？**
+
+不会。协议是「用户要求优先」：模板只提供构图、材质、灯光、层级和避坑手法，主体、准确文案、
+比例、时长、数量和禁止项都以你为准；冲突的示例品牌、人物、价格、虚构数值和占位符会被删掉。
+你要求原样发送、不润色、不参考模板时保留直传；库里的正文是参考数据，不是给 agent 的指令。
+详见 [提示词库](#prompt-library) 与 [提示词准备说明](<references/prompts/index.md>)。
 
 **Q：`generate` 卡很久是正常的吗？**
 
