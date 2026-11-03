@@ -28,13 +28,22 @@ MISSING = object()
 _IDENTITY_TOKENS = frozenset({
     "model", "models", "version", "versions", "resource", "resources",
     "endpoint", "endpoints", "provider", "catalog", "host", "hostname",
+    # Azure / GCP / 方舟这类平台的部署与计费作用域字段
+    "engine", "deployment", "deployments", "sku", "project", "region", "webhook",
 })
 
 #: 凭据字段：即使值相同也不允许由请求参数注入。
 _CREDENTIAL_TOKENS = frozenset({
     "key", "keys", "apikey", "authorization", "credential", "credentials",
     "password", "passwd", "secret", "secrets", "token", "auth", "bearer",
+    "signature", "sig",
 })
+
+#: 拆开后两个词同时出现才算身份字段（覆盖 api_base / base_url / callback_url 等写法）。
+_IDENTITY_PAIRS = (
+    ("base", "url"), ("api", "base"), ("api", "url"),
+    ("callback", "url"), ("webhook", "url"),
+)
 
 _CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _SPLIT_RE = re.compile(r"[^a-z0-9]+")
@@ -52,7 +61,14 @@ def _tokens(name: Any) -> list[str]:
 
 def is_identity_key(name: Any) -> bool:
     """这个字段名是否可能决定模型、地址或计费资源。"""
-    return any(token in _IDENTITY_TOKENS for token in _tokens(name))
+    tokens = _tokens(name)
+    if any(token in _IDENTITY_TOKENS for token in tokens):
+        return True
+    # 粘连写法（model2 / aimodel）：只做词首/词尾匹配，避免把普通单词整片打死。
+    if any((token.startswith("model") or token.endswith("model")) and len(token) >= 4
+           for token in tokens):
+        return True
+    return any(set(pair).issubset(tokens) for pair in _IDENTITY_PAIRS)
 
 
 def is_credential_key(name: Any) -> bool:
@@ -337,20 +353,22 @@ class SubmissionIdentity:
 
     @classmethod
     def from_config(cls, method: str, url: str, *, json_body: Any = None,
-                    form: Any = None, headers: Any = None,
-                    literal: Iterable[tuple] = ()) -> "SubmissionIdentity":
+                    form: Any = None, params: Any = None, headers: Any = None,
+                    literal: Iterable[tuple] = (),
+                    fields: Iterable[tuple] = ()) -> "SubmissionIdentity":
         """用**配置侧**的值创建快照；绝不能拿合并后的实际请求反向创建。"""
-        fields: list[tuple] = []
-        for location, payload in (("json_body", json_body), ("form", form)):
+        collected: list[tuple] = list(fields)
+        for location, payload in (("json_body", json_body), ("form", form),
+                                  ("params", params)):
             if isinstance(payload, dict):
-                _collect_identity(payload, (), location, fields)
+                _collect_identity(payload, (), location, collected)
         if isinstance(headers, dict):
             for name, value in headers.items():
                 if is_identity_key(name):
-                    fields.append(("headers", (str(name).lower(),), copy.deepcopy(value)))
+                    collected.append(("headers", (str(name).lower(),), copy.deepcopy(value)))
         for location, path, value in literal:
-            fields.append((location, tuple(path), copy.deepcopy(value)))
-        return cls(method, url, fields)
+            collected.append((location, tuple(path), copy.deepcopy(value)))
+        return cls(method, url, collected)
 
     def validate(self, method: str, url: str, kwargs: dict) -> None:
         """提交前复核；不一致时抛 ConfigError（早于任何生命周期/HTTP 副作用）。"""
@@ -359,7 +377,7 @@ class SubmissionIdentity:
         if str(url) != self.url:
             raise ConfigError("提交前身份校验未通过：提交地址与配置批准的地址不一致")
         actual: dict = {}
-        for location in ("json_body", "form"):
+        for location in ("json_body", "form", "params"):
             collected: list[tuple] = []
             _collect_identity(kwargs.get(location), (), location, collected)
             for loc, path, value in collected:
@@ -367,8 +385,16 @@ class SubmissionIdentity:
         headers = kwargs.get("headers")
         if isinstance(headers, dict):
             for name, value in headers.items():
-                if is_identity_key(name):
-                    actual[("headers", (str(name).lower(),))] = value
+                if not is_identity_key(name):
+                    continue
+                key = ("headers", (str(name).lower(),))
+                if key in actual and not _same(actual[key], value):
+                    # 同名不同大小写的两个头指向不同取值：谁生效取决于库的实现，
+                    # 这种歧义不能放行。
+                    raise ConfigError(
+                        "提交前身份校验未通过：同一身份头出现了不同取值"
+                    )
+                actual[key] = value
         expected = {(loc, path): value for loc, path, value in self.fields}
         collected_pairs = set(actual)
         for (location, path), wanted in expected.items():

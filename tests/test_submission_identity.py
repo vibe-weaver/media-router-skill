@@ -250,6 +250,43 @@ class SubmissionIdentityTests(unittest.TestCase):
             identity.validate("POST", "https://stub.invalid/submit", {"json_body": trusted})
         identity.validate("post", "https://stub.invalid/submit", {"json_body": {"model": "approved"}})
 
+    def test_query_identity_and_duplicate_header_are_fail_closed(self):
+        policy = self.policy()
+        identity = policy.SubmissionIdentity.from_config(
+            "POST", "https://stub.invalid/submit",
+            params={"model": "approved-model", "deployment": "approved-deployment"},
+            headers={"X-Model": "approved-model"},
+        )
+        for tampered in ({"model": "other"}, {}, {"model": "approved-model"},
+                         {"deployment": "other"}, {"extra": "approved-model"}):
+            with self.subTest(params=tampered):
+                with self.assertRaises(ConfigError):
+                    identity.validate("POST", "https://stub.invalid/submit",
+                                      {"params": tampered,
+                                       "headers": {"X-Model": "approved-model"}})
+        identity.validate("POST", "https://stub.invalid/submit",
+                          {"params": {"model": "approved-model",
+                                      "deployment": "approved-deployment",
+                                      "timestamp": "1"},
+                           "headers": {"x-model": "approved-model"}})
+        for headers in ({"X-Model": "approved-model", "x-model": "other"},
+                        {"X-Model": "other"}):
+            with self.subTest(headers=headers):
+                with self.assertRaises(ConfigError):
+                    identity.validate("POST", "https://stub.invalid/submit",
+                                      {"params": {"model": "approved-model",
+                                                  "deployment": "approved-deployment"},
+                                       "headers": headers})
+
+    def test_common_model_and_resource_aliases_are_rejected(self):
+        policy = self.policy()
+        for name in ("engine", "deployment", "deployment_name", "api_base", "base_url",
+                     "baseURL", "project", "sku", "signature", "callback_url",
+                     "webhook_url", "aimodel", "model2"):
+            with self.subTest(name=name):
+                with self.assertRaises(ConfigError):
+                    policy.validate_request_params({name: "unapproved-value"})
+
     def test_all_fifteen_adapter_submission_sites_supply_working_identity(self):
         cases = [("openai", "image", False), ("openai", "image", True), ("openai", "video", False),
                  ("openai", "audio", False), ("dashscope", "audio", False),

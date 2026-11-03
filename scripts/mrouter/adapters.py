@@ -2679,7 +2679,9 @@ def gen_generic_http(
              (req.size or req.aspect_ratio))):
         effective_spec["size_status"] = "unverified"
     submit_url = str(_render(submit_url, variables))
-    identity = policy.SubmissionIdentity(contract.method, contract.url, contract.fields)
+    identity = policy.SubmissionIdentity.from_config(
+        contract.method, contract.url, params=submit_params, fields=contract.fields
+    )
     ctx.log(f"[generic_http] {method} {submit_url}")
     payload = _submit(
         method,

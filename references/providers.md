@@ -400,8 +400,10 @@ options:
 
 - 名单之外的键直接报配置错误，不静默丢弃；
 - 名单只接受标量（字符串 / 数字 / 布尔 / null），不能整块替换嵌套对象；
-- `model`、`model_name`、`version`、`resource_id`、`endpoint`、凭据类字段永远不能进名单；
+- `model`、`model_name`、`version`、`resource_id`、`endpoint`、`engine`、`deployment`、
+  `project`、`region`、`sku`、`api_base`/`base_url`、`callback_url`、凭据类字段永远不能进名单；
 - 模板里含 `{{model}}` 的字段（含前后缀、数组、深层嵌套）整条祖先路径都不能被 `--param` 覆盖；
+- `options.submit.params`（查询串）里的选模/计费字段同样会与实际请求核对，改不动也混不过去；
 - 如果某个固定字面量其实是模型选择器（比如 `input.engine: fixed-alias`），用
   `options.model_fields: [input.engine]` 声明它；声明路径必须是模板里真实存在、且只依赖
   `{{model}}` 或不含占位符的字符串。

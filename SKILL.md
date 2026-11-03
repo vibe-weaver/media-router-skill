@@ -56,7 +56,8 @@ python3 "<SKILL_DIR>/scripts/media_router.py" generate --kind video --prompt "�
   `--param key=value`。`--param` 是「点名发给接口的运行参数」：适配器认识的键优先，
   其余键按平台透传（火山视频按 `--key value` 拼进提示词），日志里会写出透了哪些。
   **不能用它换模型或计费资源**：`model`／`model_name`／`model_id`／`version`／
-  `resource_id`／`endpoint`／凭据类字段会被直接拒绝，错误出现在取 Key 之前，
+  `resource_id`／`endpoint`／`engine`／`deployment`／`project`／`sku`／凭据类字段会被直接拒绝，
+  错误出现在取 Key 之前，
   不会拿同一个参数去试下一个候选。自定义接口（`generic_http`）的额外参数还必须先在
   配置的 `options.allowed_params` 里声明，否则同样拒绝。
 - `--kind` 支持 `image` / `video` / `audio`。语音的通路：`dashscope`

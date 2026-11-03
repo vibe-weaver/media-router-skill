@@ -90,6 +90,12 @@ class ModelAuthorizationTests(unittest.TestCase):
             "resource_id=not-approved", "api_key=private-fixture-value",
             "Authorization=private-fixture-value", "endpoint=https://not-approved.invalid",
             "inputs.model=not-approved", "payload.model_name=not-approved",
+            "engine=not-approved", "deployment=not-approved",
+            "deployment_name=not-approved", "api_base=https://not-approved.invalid",
+            "base_url=https://not-approved.invalid", "project=not-approved",
+            "sku=not-approved", "signature=private-fixture-value",
+            "callback_url=https://not-approved.invalid",
+            "aimodel=not-approved", "model2=not-approved",
         )
         for selected in ([], ["--model", "approved"]):
             for parameter in parameters:
