@@ -18,6 +18,8 @@ python3 "<SKILL_DIR>/scripts/media_router.py" web
    - **测试连通性**：只调只读接口验密钥，不生成、不花钱；
    - **真实测试**：真跑一次生成，验证“提交→推理→下载→落盘”，会消耗额度，页面会先确认。
      成功只证明本次调用，不能保证今后一直可用，也不能替代画面、听感和规格验收。
+     真实测试**只使用已保存且已启用的模型**：未保存的表单不参与，改了参数要先保存再测；
+     额度确认只是页面提示，服务端不再接受表单里的模型/厂商/地址/密钥覆盖。
    图像、视频、语音均有两个入口；「首次失败即停」仅影响本次测试，不保存模型配置。
    列表重绘会保留当前页的结果及处理中按钮锁；整页刷新后内存记录会清空。真实测试失败时也显示已有文件、产物 URL 和任务。API 的 `deep` 只接受 JSON `true` / `false`，缺省免费；其他类型提前返回 400。
 
@@ -28,7 +30,8 @@ python3 "<SKILL_DIR>/scripts/media_router.py" web
 
 它们**叠加**在用户手写的 `models.yaml` / `secrets.yaml` 之上，同 id 以页面为准，不会覆盖手写内容和注释。
 两份都在 `.gitignore` 里。用 `MEDIA_ROUTER_CONFIG` / `MEDIA_ROUTER_SECRETS` 指向别的文件时是只读模式，
-写接口返回 409。页面会一直阻塞到 Ctrl-C，**AI 助手不要用阻塞方式调它**。
+写接口返回 409；但**只读模式只拦住网页保存**，不限制同一用户权限下的程序改文件或直接发请求。
+页面会一直阻塞到 Ctrl-C，**AI 助手不要用阻塞方式调它**。
 
 ## 命令行配法
 
@@ -51,6 +54,8 @@ image:
 - `strategy` 只剩 `priority_then_weight`：先按 `priority` 分档，同档内按 `weight` 加权随机。
   （`weight_only` / `fallback_chain` 已下线，老配置会被自动纠正并告警。）
 - 密钥放环境变量，或 `secrets.yaml` 的 `keys` 下；**不要**写进 `models.yaml` 的 `api_key` 字段。
+- `--param` 只能改运行参数：`model`、`model_name`、`version`、`resource_id`、`endpoint`
+  和凭据字段会在取 Key 之前被拒绝；`--model` 也必须是已配置且未停用的条目。
 - 接入文档里没有的平台，用 `provider: generic_http` 填 YAML 即可，不用改代码。
   各家参数对照见 `references/providers.md`。
 - **⚠️ 比值/日期/占位符必须加引号**：裸写的 `1:1` 会被 YAML 当成六十进制整数 **61**

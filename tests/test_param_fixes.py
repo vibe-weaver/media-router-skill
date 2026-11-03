@@ -173,7 +173,7 @@ gcap = run(
         "custom",
         endpoint="https://gw.example.com/v1/images",
         options={"submit": {"url": "https://gw.example.com/v1/images"}, "sync": True,
-                 "result_path": "data.0.url"},
+                 "result_path": "data.0.url", "allowed_params": ["seed", "custom_flag"]},
     ),
     GenRequest(kind="image", prompt="p", extra={"seed": 31, "custom_flag": "x"}),
 )

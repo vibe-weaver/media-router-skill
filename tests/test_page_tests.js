@@ -104,6 +104,26 @@ const watchdog = setTimeout(() => { console.error('测试未完成（未决Promi
       assert(s.buttons.every(button => !button.disabled));
     }
   });
+  await test('污染表单payload不能把身份、凭据或资源带入模型测试请求', async () => {
+    for (const deep of [false, true]) {
+      const s = setup(async () => true, () => ({ok:true, summary:'预检通过', real_call:{ok:true, files:[]}}));
+      await s.context.run(s.box, {id:'tts', model:'not-approved', vendor:'other-account',
+        api_key:'private-key', params:{model:'not-approved'}, options:{endpoint:'https://other.invalid'},
+        images:['private.png'], extra:{resource_id:'other-resource'}, count:7}, deep);
+      assert.strictEqual(s.calls.length, 1);
+      assert.deepStrictEqual(JSON.parse(s.calls[0].options.body), {id:'tts', deep, fail_fast:true});
+      assert(s.calls.every(call => call.path === '/api/model/test'));
+    }
+  });
+  await test('真实测试确认说明保存启用边界，不把未保存表单自动保存', async () => {
+    let message = '';
+    const s = setup(async (title, text) => { message = title + text; return false; }, () => ({ok:true}));
+    await s.context.run(s.box, {id:'tts'}, true);
+    assert(message.includes('已保存且启用'));
+    assert(message.includes('未保存改动不参与'));
+    assert(message.includes('请先保存再测'));
+    assert.strictEqual(s.calls.length, 0);
+  });
   await test('确认弹窗期间切换只影响下次测试，不修改已发起策略', async () => {
     const confirm = deferred();
     const s = setup(() => confirm.promise, () => ({ok:true, real_call:{ok:true, files:[]}}), false);

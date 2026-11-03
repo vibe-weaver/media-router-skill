@@ -397,28 +397,39 @@ class ConfigApi:
         - ``deep=true``（真实测试）：真跑一次生成，验证「提交→推理→下载→落盘」
           整条链路。会消耗额度，页面已弹确认框。
         """
-        cfg = self._config()
-        entry, kind, model_name = self._resolve_model_for_test(body)
-        if str(entry.get("provider") or "") == "native":
-            raise ApiError("内置兜底模型不调用任何接口，无需测试；它也不能编辑，只能隐藏。")
-        # 语音不再特殊处理：目录里已经有 endpoints.audio，轻量预检走的是厂商的
-        # 只读校验接口（百炼 /tasks、OpenAI 兼容 /models），密钥和可达性都能验；
-        # 验不了模型名时，探测结果本身会如实标注「需要真实测试确认」。
-        # 早先这里硬拒语音，是担心拿图像端点去测 TTS 得出「没有默认地址」的
-        # 误导结论 —— 那个前提（目录里没有 audio 端点）已经不存在了。
-        target = self._target_from_payload(
-            {
-                "catalog_key": entry.get("catalog"),
-                "api_key_env": entry.get("api_key_env"),
-                "endpoints": entry.get("endpoints") or {},
-                "provider": entry.get("provider"),
-                "options": entry.get("options") or {},
-                "vendor_id": entry.get("vendor_id") or "",
-                "api_key": body.get("api_key") or "",
-            }
-        )
-
-        if body.get("deep", False) is False:
+        deep = body.get("deep", False) is True
+        if deep:
+            extra = set(body) - {"id", "deep", "fail_fast", "prompt"}
+            if extra:
+                raise ApiError("真实测试只接受 id、deep、fail_fast、prompt，不接受表单或覆盖字段")
+            model_id = body.get("id")
+            if not isinstance(model_id, str) or not model_id.strip():
+                raise ApiError("真实测试需要已保存且启用的模型 id；请先保存模型再测试")
+            cfg = self._config()
+            spec = cfg.require_enabled_model(model_id.strip())
+            if spec.is_native:
+                raise ApiError("内置兜底模型不调用任何接口，无需测试；它也不能编辑，只能隐藏。")
+            if spec.kind not in config.MODEL_KINDS:
+                raise ApiError(f"模型类目缺失或无法识别（{spec.kind or '空'}），无法测试")
+            kind, model_name = spec.kind, spec.model or spec.id
+            target = probe.ProbeTarget.from_saved_model(cfg, spec)
+        else:
+            # 免费预检保留未保存表单入口，不把临时内容提升为生成配置。
+            cfg = self._config()
+            entry, kind, model_name = self._resolve_model_for_test(body)
+            if str(entry.get("provider") or "") == "native":
+                raise ApiError("内置兜底模型不调用任何接口，无需测试；它也不能编辑，只能隐藏。")
+            target = self._target_from_payload(
+                {
+                    "catalog_key": entry.get("catalog"),
+                    "api_key_env": entry.get("api_key_env"),
+                    "endpoints": entry.get("endpoints") or {},
+                    "provider": entry.get("provider"),
+                    "options": entry.get("options") or {},
+                    "vendor_id": entry.get("vendor_id") or "",
+                    "api_key": body.get("api_key") or "",
+                }
+            )
             return probe.probe_target(
                 cfg, target, kind=kind, model_name=model_name
             ).to_dict()
@@ -435,31 +446,7 @@ class ConfigApi:
                 "real_call": {"ok": False, "error": "轻量预检未通过，未执行真实生成"},
             }
 
-        # 真实测试要构造一个完整的 ModelSpec，厂商条目得**两层都算** ——
-        # 手写层里的模型经常用 vendor: v-xxx 引用手写层的厂商。
-        overlay = store.load_overlay()
-        vendors = config.build_vendors(
-            list(overlay.vendors) + overlay.base_vendors()
-        )
-        spec = config.build_spec_from_entry(
-            kind,
-            {
-                # 手写层里的模型没有厂商条目可继承，provider / api_key_env /
-                # endpoint / params 都得带上，否则构造不出 spec
-                "id": entry.get("model_id") or "probe-temp",
-                "vendor": entry.get("vendor_id") or "",
-                "provider": entry.get("provider") or "",
-                "api_key_env": entry.get("api_key_env") or "",
-                "endpoint": entry.get("endpoint") or "",
-                "options": entry.get("options") or {},
-                "params": entry.get("params") or {},
-                "model": model_name,
-                "supports": body.get("supports") or [],
-                "priority": body.get("priority", 1),
-                "weight": body.get("weight", 1),
-            },
-            vendors,
-        )
+        # 生成复用预检的配置快照；不重新读取overlay或用表单重建spec。
         real = probe.deep_probe(
             cfg,
             spec,

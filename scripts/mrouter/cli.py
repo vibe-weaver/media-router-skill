@@ -37,6 +37,7 @@ from .adapters import (
     run_adapter,
 )
 from . import catalog
+from . import policy
 from .caption import build_caption, caption_enabled, profile_files
 from .config import MODEL_KINDS, ConfigError, RouterConfig, load_config
 from .health import HealthStore
@@ -319,9 +320,7 @@ def _resolve(cfg: RouterConfig, health: HealthStore, args: argparse.Namespace):
     requires = _infer_requires(args.kind, images, args.supports)
 
     if args.model:
-        spec = cfg.find_model(args.model)
-        if spec.kind != args.kind:
-            raise ConfigError(f"模型 {args.model} 属于 {spec.kind} 类目，与 --kind {args.kind} 不一致")
+        spec = cfg.require_enabled_model(args.model, kind=args.kind)
         return [spec], {
             "strategy": "forced",
             "requires": requires,
@@ -390,6 +389,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
 def _cmd_generate(args: argparse.Namespace) -> int:
     started = time.time()
     cfg = load_config()
+    extra = _parse_params(args.param)
+    # 在候选规划、取密钥和生成之前拒绝能换模型/地址/凭据的参数：
+    # 不这样做的话，同一个危险参数会被拿去挨个尝试候选模型。
+    policy.validate_request_params(extra)
     health = HealthStore(cfg.health_path)
     threshold, cooldown = cfg.health_policy()
 
@@ -421,7 +424,7 @@ def _cmd_generate(args: argparse.Namespace) -> int:
         negative_prompt=args.negative_prompt or "",
         count=int(args.count or 1),
         output_dir=None if args.no_download else out_dir,
-        extra=_parse_params(args.param),
+        extra=extra,
     )
 
     if args.kind == "audio" and req.images:

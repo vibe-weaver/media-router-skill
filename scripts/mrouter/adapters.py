@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import ConfigError, ModelSpec, RouterConfig
+from . import policy
 from .outcomes import _safe_effective_spec
 from .lifecycle import (
     GenerationInterrupted, generation_attempt, submission_started, submission_received,
@@ -80,8 +81,13 @@ class _SubmissionResponse:
         return payload
 
 
-def _submit(method: str, url: str, **kwargs):
-    """仅生成提交调用此边界；上传输入和任务查询不创建新的生成证据。"""
+def _submit(method: str, url: str, *, identity, **kwargs):
+    """仅生成提交调用此边界；上传输入和任务查询不创建新的生成证据。
+
+    ``identity`` 是**配置侧**冻结的模型身份快照（必需）：在提交动作和 HTTP
+    之前复核实际请求，防止参数合并把批准模型/地址/计费资源换掉。
+    """
+    identity.validate(method, url, kwargs)
     submission_started()
     response = request(method, url, generation_submission=True, **kwargs)
     submission_received()
@@ -638,6 +644,58 @@ def _merge_leftover(
     return target
 
 
+def _submission_identity(
+    method: str,
+    url: str,
+    *,
+    body: dict[str, Any] | None = None,
+    form: dict[str, Any] | None = None,
+    headers: dict[str, Any] | None = None,
+    literal: tuple = (),
+) -> policy.SubmissionIdentity:
+    return policy.SubmissionIdentity.from_config(
+        method, url, json_body=body, form=form, headers=headers, literal=literal
+    )
+
+
+def _config_identity(
+    spec: ModelSpec, defaults: dict[str, Any] | None = None, *, skip_empty: bool = False
+) -> dict[str, Any]:
+    """配置侧的模型身份值：与各适配器 ``body.update(spec.params)`` 的语义一致。
+
+    只收身份类字段；``--param`` 不参与，否则就等于拿实际请求给自己发通行证。
+    """
+    payload = dict(defaults or {})
+    for key, value in (spec.params or {}).items():
+        if not policy.is_identity_key(key):
+            continue
+        if skip_empty and value in (None, ""):
+            continue
+        payload[key] = value
+    return payload
+
+
+def _declared_inputs(spec: ModelSpec) -> dict[str, Any]:
+    """可信配置会进入 ``input`` 的字段：params 打底，options.inputs 覆盖。"""
+    merged: dict[str, Any] = dict(spec.params or {})
+    declared = spec.options.get("inputs") if isinstance(spec.options, dict) else None
+    if isinstance(declared, dict):
+        merged.update(declared)
+    return merged
+
+
+def _config_passthrough_identity(spec: ModelSpec) -> dict[str, Any]:
+    return {key: value for key, value in _declared_inputs(spec).items()
+            if policy.is_identity_key(key)}
+
+
+def _replicate_identity(spec: ModelSpec, version: Any) -> dict[str, Any]:
+    identity: dict[str, Any] = {"input": _config_passthrough_identity(spec)}
+    if version:
+        identity["version"] = version
+    return identity
+
+
 def _passthrough_inputs(
     spec: ModelSpec,
     req: GenRequest,
@@ -917,6 +975,7 @@ def _gen_openai_video(
     /images/generations，拿回来的 VideoResult 里没有 ``data``，于是报一句
     "响应中没有图片数据" —— 用户看到的是"我明明配了视频模型"，却查不到原因。
     """
+    policy.validate_request_params(req.extra, spec)
     url, task_base = _openai_video_target(spec)
     if spec.endpoint and task_base == ZHIPU_BASE and "/videos/generations" not in str(
         spec.endpoint
@@ -973,8 +1032,12 @@ def _gen_openai_video(
                                   duration_source=duration_source)
 
     ctx.log(f"[openai] video submit -> {url}")
+    identity = _submission_identity(
+        "POST", url, body=_config_identity(spec, {"model": spec.model or spec.id})
+    )
     payload = (
-        _submit("POST", url, headers=headers, json_body=body, timeout=ctx.timeout).json()
+        _submit("POST", url, identity=identity, headers=headers, json_body=body,
+                timeout=ctx.timeout).json()
         or {}
     )
     if isinstance(payload, dict) and payload.get("error"):
@@ -1123,6 +1186,7 @@ def _gen_openai_audio(
     另外它失败时也可能回 200 + JSON 错误体，这里显式认一下 ——
     否则会把一段 JSON 存成 .mp3，用户点开才发现是报错文本。
     """
+    policy.validate_request_params(req.extra, spec)
     url = _openai_speech_url(spec)
     params: dict[str, Any] = {**spec.params, **req.extra}
     # 先算格式和音色：两者都要按**实际打到的域名**取默认值，不能写死 OpenAI 那一套。
@@ -1148,13 +1212,17 @@ def _gen_openai_audio(
 
     ctx.log(f"[openai] audio speech -> {url}（{fmt}）")
     stem = f"{req.kind}_{_safe(spec.id)}_{time.strftime('%Y%m%d_%H%M%S')}"
+    identity = _submission_identity(
+        "POST", url,
+        body=_config_identity(spec, {"model": spec.model or spec.id}, skip_empty=True),
+    )
     files: list[str] = []
     started = _waiting(ctx, "openai-speech", hint="同步接口，返回音频二进制")
     for index in range(1, max(1, int(req.count or 1)) + 1):
         if (req.count or 1) > 1:
             ctx.log(f"[openai-speech] 第 {index}/{int(req.count)} 段…")
         resp = _submit(
-            "POST", url,
+            "POST", url, identity=identity,
             headers={"Authorization": f"Bearer {ctx.api_key}"},
             json_body=payload, timeout=ctx.timeout,
         )
@@ -1208,6 +1276,7 @@ def gen_openai(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) ->
     SiliconFlow、Together、以及大多数自建网关都兼容这套协议，
     只要在配置里改 endpoint 就能复用。
     """
+    policy.validate_request_params(req.extra, spec)
     if req.kind == "audio":
         return _gen_openai_audio(spec, req, cfg, ctx)
     if req.kind == "video":
@@ -1243,8 +1312,12 @@ def gen_openai(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) ->
         effective_spec = _output_spec(form, spec, req)
         ctx.log(f"[openai] edits -> {url}")
         started = _waiting(ctx, "openai-edits")
+        identity = _submission_identity(
+            "POST", url, form={"model": spec.model or spec.id}
+        )
         resp = _submit(
-            "POST", url, headers=headers, form=form, files=files, timeout=ctx.timeout
+            "POST", url, identity=identity, headers=headers, form=form, files=files,
+            timeout=ctx.timeout
         )
         _waited(ctx, "openai-edits", started)
     else:
@@ -1266,7 +1339,11 @@ def gen_openai(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) ->
         effective_spec = _output_spec(body, spec, req)
         ctx.log(f"[openai] generations -> {url}")
         started = _waiting(ctx, "openai-image")
-        resp = _submit("POST", url, headers=headers, json_body=body, timeout=ctx.timeout)
+        identity = _submission_identity(
+            "POST", url, body=_config_identity(spec, {"model": spec.model or spec.id})
+        )
+        resp = _submit("POST", url, identity=identity, headers=headers, json_body=body,
+                       timeout=ctx.timeout)
         _waited(ctx, "openai-image", started)
 
     payload = resp.json() or {}
@@ -1340,6 +1417,7 @@ def _is_qwen3_tts(spec: ModelSpec) -> bool:
 
 def gen_dashscope(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> GenResult:
     """阿里云百炼 / 通义万相。qwen-image 系列走同步多模态接口，wanx 系列走异步任务。"""
+    policy.validate_request_params(req.extra, spec)
     if req.kind == "audio":
         return _gen_dashscope_audio(spec, req, cfg, ctx)
     if req.kind == "image" and _is_qwen_image(spec):
@@ -1362,6 +1440,7 @@ def _gen_dashscope_audio(
     ``{"model":..., "input": {"text_prompt": "你好"}}`` 就返回 200，
     默认是 wav。所以这里不硬编码任何音色名 —— 硬编码一个音色，换模型就 400。
     """
+    policy.validate_request_params(req.extra, spec)
     endpoint = str(spec.endpoint or "").strip()
     if not endpoint:
         endpoint = DASHSCOPE_QWEN_IMAGE if _is_qwen3_tts(spec) else DASHSCOPE_TTS
@@ -1376,11 +1455,19 @@ def _gen_dashscope_audio(
     ctx.log(f"[dashscope-tts] {endpoint}")
     urls: list[str] = []
     meta: dict[str, Any] = {"sync": True}
+    identity = _submission_identity(
+        "POST", endpoint,
+        body={
+            "model": spec.model or spec.id,
+            "input": {key: value for key, value in (spec.params or {}).items()
+                      if policy.is_identity_key(key) and value not in (None, "")},
+        },
+    )
     # --count N 对语音同样要生效：之前固定只发一次请求，传了 --count 2 也只得到
     # 一段音频，而 JSON 里的 count 还是 1 —— 用户会以为是平台没返回。
     for _ in range(max(1, int(req.count or 1))):
         payload = _submit(
-            "POST", endpoint,
+            "POST", endpoint, identity=identity,
             headers={
                 "Authorization": f"Bearer {ctx.api_key}",
                 "Content-Type": "application/json",
@@ -1478,6 +1565,7 @@ def _gen_dashscope_qwen_image(
     spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
 ) -> GenResult:
     """qwen-image：同步多模态接口（messages 进、choices[].message.content[].image 出）。"""
+    policy.validate_request_params(req.extra, spec)
     url = _dashscope_qwen_url(spec)
     content: list[dict[str, Any]] = []
     if req.prompt:
@@ -1513,6 +1601,14 @@ def _gen_dashscope_qwen_image(
     ctx.log(f"[dashscope-qwen] {url}")
     urls: list[str] = []
     started = _waiting(ctx, "dashscope-qwen", hint=f"同步接口，共 {max(1, int(req.count or 1))} 次请求")
+    identity = _submission_identity(
+        "POST", url,
+        body={
+            "model": spec.model or spec.id,
+            "parameters": {key: value for key, value in (spec.params or {}).items()
+                           if policy.is_identity_key(key)},
+        },
+    )
     # 多模态同步接口没有 n / num_images 这类批量参数，`--count N` 只能**逐个提交**。
     # 以前这里固定只发一次，用户要 3 张却只拿到 1 张，status 还是 ok。
     total = max(1, int(req.count or 1))
@@ -1520,7 +1616,7 @@ def _gen_dashscope_qwen_image(
         if total > 1:
             ctx.log(f"[dashscope-qwen] 第 {_index + 1}/{total} 张…")
         payload = _submit(
-            "POST", url,
+            "POST", url, identity=identity,
             headers={
                 "Authorization": f"Bearer {ctx.api_key}",
                 "Content-Type": "application/json",
@@ -1584,6 +1680,7 @@ def _gen_dashscope_wanx(
     spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
 ) -> GenResult:
     """wanx 系列：异步任务（提交拿 task_id，再轮询）。"""
+    policy.validate_request_params(req.extra, spec)
     headers = {
         "Authorization": f"Bearer {ctx.api_key}",
         "Content-Type": "application/json",
@@ -1661,8 +1758,16 @@ def _gen_dashscope_wanx(
     effective_spec = _output_spec(parameters, spec, req, sources={"size": size_source},
                                   duration_source=duration_source)
     ctx.log(f"[dashscope] submit -> {url}")
+    identity = _submission_identity(
+        "POST", url,
+        body={
+            "model": spec.model or spec.id,
+            "parameters": {key: value for key, value in (spec.params or {}).items()
+                           if policy.is_identity_key(key)},
+        },
+    )
     payload = _submit(
-        "POST", url, headers=headers, json_body=body, timeout=ctx.timeout
+        "POST", url, identity=identity, headers=headers, json_body=body, timeout=ctx.timeout
     ).json() or {}
     task_id = _dig(payload, "output.task_id")
     if not task_id:
@@ -1747,6 +1852,7 @@ def _gen_volcengine_audio(
     音色是必填的（``speaker``），且它在请求体里而不是模型名里 —— 所以这里
     也做前置校验，别让用户白跑一次拿 ``45000000`` 之类的错误码。
     """
+    policy.validate_request_params(req.extra, spec)
     url = str(spec.endpoint or "").strip() or VOLC_TTS
     params: dict[str, Any] = {**spec.params, **req.extra}
 
@@ -1782,6 +1888,13 @@ def _gen_volcengine_audio(
         headers["X-Api-Access-Key"] = token.strip()
     else:
         headers["X-Api-Key"] = key
+
+    literal = []
+    if spec.params.get("model") not in (None, ""):
+        literal.append(("json_body", ("req_params", "model"), spec.params["model"]))
+    identity = _submission_identity(
+        "POST", url, headers={"X-Api-Resource-Id": resource}, literal=literal
+    )
 
     stem = f"{req.kind}_{_safe(spec.id)}_{time.strftime('%Y%m%d_%H%M%S')}"
     fmt = str(audio_params.get("format") or "mp3")
@@ -1819,7 +1932,8 @@ def _gen_volcengine_audio(
         headers["X-Api-Request-Id"] = f"mr-{int(time.time() * 1000)}-{index}"
 
         ctx.log(f"[volcengine] tts -> {url}（{resource}）")
-        resp = _submit("POST", url, headers=headers, json_body={"req_params": req_params}, timeout=ctx.timeout)
+        resp = _submit("POST", url, identity=identity, headers=headers,
+                       json_body={"req_params": req_params}, timeout=ctx.timeout)
         raw = (resp.body or b"").decode("utf-8", "replace")
 
         pieces: list[bytes] = []
@@ -1873,6 +1987,7 @@ def _gen_volcengine_audio(
 
 def gen_volcengine(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> GenResult:
     """火山方舟：即梦图片走同步接口，Seedance 视频走异步任务；语音走豆包语音的另一套接口。"""
+    policy.validate_request_params(req.extra, spec)
     if req.kind == "audio":
         return _gen_volcengine_audio(spec, req, cfg, ctx)
     headers = {"Authorization": f"Bearer {ctx.api_key}", "Content-Type": "application/json"}
@@ -1913,9 +2028,13 @@ def gen_volcengine(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
         if "duration_field" in effective_spec:
             effective_spec["duration_field"] = "--dur"
         ctx.log(f"[volcengine] video submit -> {url}")
+        identity = _submission_identity(
+            "POST", url, body={"model": spec.model or spec.id}
+        )
         payload = _submit(
             "POST",
             url,
+            identity=identity,
             headers=headers,
             json_body={"model": spec.model or spec.id, "content": content},
             timeout=ctx.timeout,
@@ -1974,8 +2093,11 @@ def gen_volcengine(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
     effective_spec = _output_spec(body, spec, req)
     ctx.log(f"[volcengine] image -> {url}")
     started = _waiting(ctx, "volcengine-image")
+    identity = _submission_identity(
+        "POST", url, body=_config_identity(spec, {"model": spec.model or spec.id})
+    )
     payload = _submit(
-        "POST", url, headers=headers, json_body=body, timeout=ctx.timeout
+        "POST", url, identity=identity, headers=headers, json_body=body, timeout=ctx.timeout
     ).json() or {}
     _waited(ctx, "volcengine-image", started)
     return _finalize_image_items(spec, req, payload.get("data"), payload, effective_spec)
@@ -2085,6 +2207,7 @@ def _gen_kling_audio(
     结果在 ``data.task_result.audios[]``，每项形如
     ``{"id": "...", "url": "...mp3", "duration": "2.232"}`` —— 注意 duration 是**字符串**。
     """
+    policy.validate_request_params(req.extra, spec)
     base = str(spec.endpoint or "").strip().rstrip("/") or f"{KLING_BASE}/audio/tts"
     body: dict[str, Any] = {"text": req.prompt}
     body.update(spec.params)
@@ -2109,10 +2232,12 @@ def _gen_kling_audio(
 
     urls: list[str] = []
     extra: dict[str, Any] = {}
+    identity = _submission_identity("POST", base, body=_config_identity(spec))
     for _ in range(max(1, int(req.count or 1))):
         ctx.log(f"[kling] tts submit -> {base}")
         payload = _submit(
-            "POST", base, headers=headers, json_body=body, timeout=ctx.timeout
+            "POST", base, identity=identity, headers=headers, json_body=body,
+            timeout=ctx.timeout
         ).json() or {}
         if payload.get("code") not in (0, None):
             _reject_response(payload)
@@ -2168,6 +2293,7 @@ def _gen_kling_audio(
 
 
 def gen_kling(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> GenResult:
+    policy.validate_request_params(req.extra, spec)
     headers = {
         "Authorization": _kling_authorization(spec, ctx, cfg),
         "Content-Type": "application/json",
@@ -2229,8 +2355,11 @@ def gen_kling(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> 
     effective_spec = _output_spec(body, spec, req, sources={"aspect_ratio": ratio_source},
                                   duration_source=duration_source)
     ctx.log(f"[kling] submit -> {url}")
+    identity = _submission_identity(
+        "POST", url, body=_config_identity(spec, {"model_name": spec.model or spec.id})
+    )
     payload = _submit(
-        "POST", url, headers=headers, json_body=body, timeout=ctx.timeout
+        "POST", url, identity=identity, headers=headers, json_body=body, timeout=ctx.timeout
     ).json() or {}
     if payload.get("code") not in (0, None):
         _reject_response(payload)
@@ -2281,6 +2410,7 @@ REPLICATE_BASE = "https://api.replicate.com/v1"
 
 
 def gen_replicate(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> GenResult:
+    policy.validate_request_params(req.extra, spec)
     headers = {
         "Authorization": f"Bearer {ctx.api_key}",
         "Content-Type": "application/json",
@@ -2309,8 +2439,9 @@ def gen_replicate(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx)
 
     effective_spec = _passthrough_output_spec(spec, req, inputs)
     ctx.log(f"[replicate] submit -> {url}")
+    identity = _submission_identity("POST", url, body=_replicate_identity(spec, version))
     payload = _submit(
-        "POST", url, headers=headers, json_body=body, timeout=ctx.timeout
+        "POST", url, identity=identity, headers=headers, json_body=body, timeout=ctx.timeout
     ).json() or {}
     status = str(payload.get("status") or "").lower()
     get_url = (payload.get("urls") or {}).get("get") or ""
@@ -2352,6 +2483,7 @@ def gen_replicate(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx)
 
 
 def gen_fal(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> GenResult:
+    policy.validate_request_params(req.extra, spec)
     headers = {"Authorization": f"Key {ctx.api_key}", "Content-Type": "application/json"}
     url = spec.endpoint or f"https://queue.fal.run/{spec.model or spec.id}"
     # 同 replicate：统一走 _passthrough_inputs，fal 的批量出图字段是 num_images。
@@ -2368,8 +2500,9 @@ def gen_fal(spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx) -> Ge
 
     effective_spec = _passthrough_output_spec(spec, req, body)
     ctx.log(f"[fal] submit -> {url}")
+    identity = _submission_identity("POST", url, body=_config_passthrough_identity(spec))
     payload = _submit(
-        "POST", url, headers=headers, json_body=body, timeout=ctx.timeout
+        "POST", url, identity=identity, headers=headers, json_body=body, timeout=ctx.timeout
     ).json() or {}
     status_url = payload.get("status_url")
     response_url = payload.get("response_url")
@@ -2481,6 +2614,8 @@ def gen_generic_http(
       * 既没写 sync 也没写 poll.url 时，按**同步**处理（提交响应里直接是结果）
     """
     options = spec.options
+    policy.validate_request_params(req.extra, spec)
+    contract = policy.generic_contract(spec)
     # 本地图片要 base64 后重新编码，不能每个占位符各编一次（一张 4MB 的图会被
     # 编成三份字符串塞进变量表）。先算一次，后面的 image / image_url 共用。
     images_rendered = [_image_value(img) for img in req.images]
@@ -2544,10 +2679,12 @@ def gen_generic_http(
              (req.size or req.aspect_ratio))):
         effective_spec["size_status"] = "unverified"
     submit_url = str(_render(submit_url, variables))
+    identity = policy.SubmissionIdentity(contract.method, contract.url, contract.fields)
     ctx.log(f"[generic_http] {method} {submit_url}")
     payload = _submit(
         method,
         submit_url,
+        identity=identity,
         headers=submit_headers,
         params=submit_params or None,
         json_body=merged_body if method in ("POST", "PUT", "PATCH") else None,
@@ -2720,6 +2857,10 @@ def run_adapter(
     spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
 ) -> GenResult:
     """按 provider 派发；未知 provider 直接报错，避免静默走错通道。"""
+    if cfg is not None:
+        # 执行入口再按 id 取一次配置里的 canonical 条目：调用方传进来的对象
+        # 即使被伪造，也不能用它绕过停用状态或类目限制。
+        spec = cfg.require_enabled_model(spec.id, kind=req.kind)
     adapter = ADAPTERS.get(spec.provider)
     if adapter is None:
         raise HttpError(

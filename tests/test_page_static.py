@@ -104,6 +104,13 @@ check('data-act="test-model"' in PAGE and 'data-act="real-test-model"' in PAGE,
 check('class="actions-row"' in PAGE, "卡片按钮收在独立容器里（窄屏整体换行）")
 check('id="test-fail-fast"' in PAGE and 'fail_fast:' in PAGE, "测试可选择临时首次失败即停策略")
 check('不保证实际生成成功' in PAGE, "免费预检如实说明验证边界")
+_test_model = PAGE[PAGE.index("async function testModel"):PAGE.index("/* ------------------------------------------------------------------ 事件 */")]
+check('已保存且启用' in _test_model and '未保存改动不参与' in _test_model and '请先保存再测' in _test_model,
+      "真实测试确认明确保存、启用与未保存改动的边界")
+check(re.search(r'JSON\.stringify\(\{\s*id:\s*mid,\s*deep:\s*!!deep,\s*fail_fast:\s*failFast\s*\}\)', _test_model) is not None,
+      "模型测试请求显式白名单，仅发送保存ID和两个临时布尔开关")
+check('Object.assign({}, payload' not in _test_model and 'collectModelPayload(' not in _test_model and
+      'saveModel(' not in _test_model, "真实测试不复制表单或自动保存未保存改动")
 
 # 临时严格策略：原生 checkbox 维持状态，外观是立体按压按钮，不受满宽输入框样式干扰。
 _fast_input = re.search(r'<input\b[^>]*\bid="test-fail-fast"[^>]*>', PAGE)
@@ -161,6 +168,19 @@ check("## 快速路径" in SKILL, "SKILL.md 有快速路径")
 check("不要先跑" in SKILL and "resolve" in SKILL, "SKILL.md 不再强制先 resolve")
 check("这一步不能跳" not in SKILL, "SKILL.md 已移除旧的强制 resolve 措辞")
 check((ROOT / "references" / "setup.md").is_file(), "references/setup.md 存在")
+
+# 模型授权：参数不能换模型，真实测试只用保存后的启用条目
+check("不能用它换模型或计费资源" in SKILL and "allowed_params" in SKILL,
+      "SKILL.md 说明 --param 不能换模型且自定义接口需显式放行")
+check("已启用" in SKILL and "真实测试也只使用已保存且启用的条目" in SKILL,
+      "SKILL.md 说明停用模型与真实测试的授权范围")
+SETUP = (ROOT / "references" / "setup.md").read_text(encoding="utf-8")
+check("只使用已保存且已启用的模型" in SETUP, "setup.md 说明真实测试只用已保存启用模型")
+check("只读模式只拦住网页保存" in SETUP, "setup.md 不把网页只读模式说成沙箱")
+PROVIDERS = (ROOT / "references" / "providers.md").read_text(encoding="utf-8")
+check("allowed_params" in PROVIDERS and "model_fields" in PROVIDERS,
+      "providers.md 记录自定义接口的运行参数白名单与身份字段声明")
+check("只能用固定文本或 `{{model}}`" in PROVIDERS, "providers.md 限制提交地址占位符")
 
 print(f"\n通过 {passed} 项，失败 {failed} 项")
 sys.exit(1 if failed else 0)

@@ -56,6 +56,8 @@ class ProbeTarget:
     endpoints: dict[str, str] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)
     vendor_id: str = ""
+    #: 仅由保存模型投影设置；页面payload不能切换这个权威凭据分支。
+    saved_model_id: str = ""
 
     @classmethod
     def from_vendor(cls, vendor: Vendor) -> "ProbeTarget":
@@ -66,6 +68,25 @@ class ProbeTarget:
             endpoints=dict(vendor.endpoints),
             options=dict(vendor.options),
             vendor_id=vendor.id,
+        )
+
+    @classmethod
+    def from_saved_model(cls, cfg: RouterConfig, spec: ModelSpec) -> "ProbeTarget":
+        """只投影配置中的执行目标，预检不借用别的类目地址或厂商凭据。"""
+        spec = cfg.require_enabled_model(spec.id)
+        vendor = cfg.vendors.get(spec.vendor)
+        catalog_key = (vendor.catalog or vendor.provider) if vendor else ""
+        entry = catalog.get(catalog_key)
+        if entry is None or entry.provider != spec.provider:
+            catalog_key = catalog.guess_key(spec.provider, spec.endpoint)
+        return cls(
+            catalog_key=catalog_key,
+            provider=spec.provider,
+            api_key_env=spec.api_key_env,
+            endpoints={spec.kind: spec.endpoint} if spec.endpoint else {},
+            options=dict(spec.options),
+            vendor_id=spec.vendor,
+            saved_model_id=spec.id,
         )
 
 
@@ -95,7 +116,10 @@ class ProbeResult:
 def resolve_key(
     cfg: RouterConfig, target: ProbeTarget
 ) -> tuple[str, str]:
-    """返回 (key, 来源)。页面直接填的明文优先，其次是环境变量、secrets 文件。"""
+    """保存模型与生成共用凭据规则；未保存轻量表单仍可使用页面输入。"""
+    if target.saved_model_id:
+        spec = cfg.require_enabled_model(target.saved_model_id)
+        return cfg.resolve_api_key(spec)
     if target.api_key.strip():
         return target.api_key.strip(), "页面输入"
 
@@ -481,20 +505,21 @@ def deep_probe(
     """真跑一次生成；失败保留公共诊断，不把免费预检当生成成功。"""
     started = time.monotonic()
     with execution_policy(fail_fast=fail_fast):
-        if is_fail_fast() and spec.is_native:
-            result = {"ok": False, "error": "严格模式不能在本进程完成内置生成验证，未执行委托"}
-        else:
-            try:
+        try:
+            spec = cfg.require_enabled_model(spec.id)
+            if is_fail_fast() and spec.is_native:
+                result = {"ok": False, "error": "严格模式不能在本进程完成内置生成验证，未执行委托"}
+            else:
                 result = _deep_probe(cfg, spec, prompt, timeout=timeout,
                                      poll_interval=poll_interval, max_poll=max_poll)
-            except Exception as exc:  # noqa: BLE001 - 网页报告失败，不将厂商异常变成500
-                diag = diagnose_error(exc)
-                error = f"{type(exc).__name__}: {exc}"
-                if diag["detail"]:
-                    error += " —— " + diag["detail"]
-                result = {"ok": False, "error": redact(error), "hint": diag["hint"],
-                          "diagnostic": diag}
-                result.update(_recovery_fields(exc))
+        except Exception as exc:  # noqa: BLE001 - 网页报告失败，不将厂商异常变成500
+            diag = diagnose_error(exc)
+            error = f"{type(exc).__name__}: {exc}"
+            if diag["detail"]:
+                error += " —— " + diag["detail"]
+            result = {"ok": False, "error": redact(error), "hint": diag["hint"],
+                      "diagnostic": diag}
+            result.update(_recovery_fields(exc))
     result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     return result
 

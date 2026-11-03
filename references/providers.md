@@ -352,12 +352,14 @@ kind 不匹配时宁可不发，并留一行日志说明（不是静默忽略）
 | `options.auth.type: none` | — | 公开接口，不需要密钥（此时 `api_key_env` 可省略） |
 | `options.sync` | `false` | `true` = 提交响应里直接就是结果，跳过轮询 |
 | `options.keyless` | `false` | 强制声明不需要密钥 |
+| `options.allowed_params` | `[]` | 允许 `--param` 覆盖的运行参数名（只支持标量）；不声明就一律拒绝 |
+| `options.model_fields` | `[]` | 模板里固定写死、但承载模型语义的字段路径，如 `input.engine` |
 
 ### `options.submit`
 
 | 字段 | 说明 |
 |---|---|
-| `url` | 提交地址，支持 `{{占位符}}` |
+| `url` | 提交地址，只能用固定文本或 `{{model}}` 占位符；`{{prompt}}` 等运行变量会被拒绝 |
 | `method` | 默认 `POST`；这是生成提交，即使指定 PUT/GET 也不会因错误自动重放 |
 | `headers` | 额外请求头 |
 | `params` | 额外查询参数 |
@@ -388,8 +390,23 @@ kind 不匹配时宁可不发，并留一行日志说明（不是静默忽略）
 
 如果某个值是纯占位符（如 `size: "{{duration}}"`），会保留原始类型（数字/布尔）而不是转成字符串。
 
-命令行 `--param key=value` 也会合并进提交请求体：模板里已经写了的键会被覆盖，
-**模板里没有的键会直接加上**（模板不必为了一个新字段先改一遍）。
+命令行 `--param key=value` 只用于「运行参数」（尺寸、seed、水印等）。**默认不放行任何额外键**：
+要在自定义接口上传平台特有参数，必须先在可信配置里列出字段名：
+
+```yaml
+options:
+  allowed_params: [seed, watermark, custom_flag]
+```
+
+- 名单之外的键直接报配置错误，不静默丢弃；
+- 名单只接受标量（字符串 / 数字 / 布尔 / null），不能整块替换嵌套对象；
+- `model`、`model_name`、`version`、`resource_id`、`endpoint`、凭据类字段永远不能进名单；
+- 模板里含 `{{model}}` 的字段（含前后缀、数组、深层嵌套）整条祖先路径都不能被 `--param` 覆盖；
+- 如果某个固定字面量其实是模型选择器（比如 `input.engine: fixed-alias`），用
+  `options.model_fields: [input.engine]` 声明它；声明路径必须是模板里真实存在、且只依赖
+  `{{model}}` 或不含占位符的字符串。
+
+只用 `{{model}}` 的模板不用声明 `model_fields`，程序会自动识别。
 
 ### 完整示例
 
@@ -406,6 +423,7 @@ kind 不匹配时宁可不发，并留一行日志说明（不是静默忽略）
       type: header
       header: X-API-Key
     sync: false
+    allowed_params: [seed, watermark]     # --param 只能改这些运行参数
     submit:
       url: https://api.example.com/v1/images
       method: POST

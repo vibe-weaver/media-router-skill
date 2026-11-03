@@ -15,7 +15,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from mrouter import adapters, transport  # noqa: E402
+from mrouter import adapters, config, transport  # noqa: E402
 from mrouter.adapters import Ctx, GenRequest, GenResult  # noqa: E402
 from mrouter.caption import profile_files  # noqa: E402
 from mrouter.config import ModelSpec  # noqa: E402
@@ -165,7 +165,7 @@ class AdapterEvidenceTests(unittest.TestCase):
 
     def test_generic_direct_seconds_template_observes_final_overrides(self):
         options = {"submit": {"body": {"duration": "{{duration}}", "size": "{{size}}"}},
-                   "result_path": "data"}
+                   "allowed_params": ["duration"], "result_path": "data"}
         ev, body, _ = self.capture("generic_http", options=options, duration=5,
                                    params={"duration": 3}, extra={"duration": 7})
         self.assertEqual(body["duration"], 7)
@@ -193,8 +193,9 @@ class AdapterEvidenceTests(unittest.TestCase):
                                 ("kling", "model"), ("replicate", "model"),
                                 ("fal", "model"), ("generic_http", "model")):
             with self.subTest(provider=provider, model=model):
+                options = {"allowed_params": ["size"]} if provider == "generic_http" else None
                 ev, body, _ = self.capture(provider, "image", model=model, params={"size": "512x512"},
-                                           extra={"size": "1024x768"})
+                                           options=options, extra={"size": "1024x768"})
                 sent = body.get("parameters", body.get("input", body))["size"]
                 self.assertEqual(ev.get("size"), sent)
                 self.assertEqual(ev.get("size_source"), "extra.size")
@@ -226,7 +227,7 @@ class AdapterEvidenceTests(unittest.TestCase):
             with self.subTest(provider=provider):
                 ev, body, _ = self.capture(provider, "image", params={"width": 512, "height": 512},
                                            extra={"width": 1024, "height": 768,
-                                                  "image_size": {"width": 640, "height": 480, "secret": "must-not-copy"}})
+                                                  "image_size": {"width": 640, "height": 480, "note": "must-not-copy"}})
                 sent = body.get("input", body)
                 self.assertEqual(ev.get("width"), sent["width"])
                 self.assertEqual(ev.get("height"), sent["height"])
@@ -235,13 +236,31 @@ class AdapterEvidenceTests(unittest.TestCase):
 
     def test_metadata_never_copies_arbitrary_body_or_secrets(self):
         ev, _, _ = self.capture("openai", extra={"duration": 5, "size": "https://secret.invalid/?token=private",
-                                               "api_key": "must-not-copy", "seed": 999,
-                                               "watermark": False, "custom": {"secret": "must-not-copy"}})
+                                               "opaque_marker": "must-not-copy", "seed": 999,
+                                               "watermark": False, "custom": {"note": "must-not-copy"}})
         text = json.dumps(ev)
-        for value in ("must-not-copy", "secret.invalid", "private", "api_key", "seed", "custom", "prompt"):
+        for value in ("must-not-copy", "secret.invalid", "private", "opaque_marker", "seed", "custom", "prompt"):
             self.assertNotIn(value, text)
         self.assertEqual(ev.get("duration_seconds"), 5)
         self.assertEqual(ev.get("size_status"), "unverified")
+
+    def test_identity_and_credential_overrides_are_rejected_before_submission(self):
+        for extra in ({"model": "unapproved"}, {"model_name": "unapproved"},
+                      {"api_key": "must-not-copy"}, {"endpoint": "https://other.invalid"},
+                      {"inputs": {"model_id": "unapproved"}},
+                      {"custom": [{"resource_id": "unapproved"}]}):
+            with self.subTest(keys=sorted(extra)):
+                spec = ModelSpec(id="test", provider="openai", kind="image", model="test-model",
+                                 endpoint="https://stub.invalid/submit")
+                req = GenRequest(kind="image", prompt="offline", extra=extra)
+                ctx = Ctx(api_key="offline-test-key", key_source="test", timeout=1,
+                          poll_interval=0, max_poll=1)
+                with patch.object(adapters, "request") as submit:
+                    with self.assertRaises(config.ConfigError) as caught:
+                        adapters.gen_openai(spec, req, None, ctx)
+                submit.assert_not_called()
+                self.assertNotIn("unapproved", str(caught.exception))
+                self.assertNotIn("must-not-copy", str(caught.exception))
 
     def test_volcengine_video_records_sent_size_flags_without_changing_request(self):
         for field, value in (("size", "1280x720"), ("image_size", "landscape_16_9"),
@@ -250,9 +269,9 @@ class AdapterEvidenceTests(unittest.TestCase):
             with self.subTest(field=field):
                 ev, body, _ = self.capture("volcengine", duration=5, aspect_ratio="16:9",
                     params={field: "not-sent"},
-                    extra={field: value, "seed": 0, "api_key": "must-not-copy"})
+                    extra={field: value, "seed": 0, "opaque_marker": "must-not-copy"})
                 self.assertEqual(body, {"model": "test-model", "content": [{"type": "text", "text":
-                    f"offline --ratio 16:9 --dur 5 --{field} {value} --seed 0 --api_key must-not-copy"}]})
+                    f"offline --ratio 16:9 --dur 5 --{field} {value} --seed 0 --opaque_marker must-not-copy"}]})
                 self.assertEqual(ev.get(field), value)
                 self.assertEqual(ev.get(field + "_source"), "extra." + field)
                 self.assertEqual(ev.get("size_status"), "explicit")

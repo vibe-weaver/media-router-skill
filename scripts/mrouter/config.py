@@ -465,6 +465,17 @@ class RouterConfig:
             f" 或配置页面里添加。"
         )
 
+    def require_enabled_model(self, model_id: str, *, kind: str = "") -> ModelSpec:
+        """执行入口只使用当前配置中的启用条目，不影响管理和诊断查询。"""
+        spec = self.find_model(model_id)
+        if not spec.enabled:
+            raise ConfigError(f"模型 {model_id} 已停用，不能执行生成或真实测试")
+        if kind and spec.kind != kind:
+            raise ConfigError(
+                f"模型 {model_id} 属于 {spec.kind} 类目，与请求类目 {kind} 不一致"
+            )
+        return spec
+
     def _health_cfg(self) -> tuple[int, float]:
         hcfg = self.defaults.get("health") or {}
         threshold = int(hcfg.get("failure_threshold", 3) or 3)

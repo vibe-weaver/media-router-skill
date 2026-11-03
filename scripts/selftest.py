@@ -1246,8 +1246,10 @@ def check_bugfixes(check) -> None:
                 )
 
             POSTED_BODIES.clear()
+            bare_spec = video_spec({})
+            probe_cfg.pools["video"] = config.Pool("video", "priority_then_weight", [bare_spec])
             bare = probe.deep_probe(
-                probe_cfg, video_spec({}), "自检用视频", timeout=10, poll_interval=1, max_poll=20
+                probe_cfg, bare_spec, "自检用视频", timeout=10, poll_interval=1, max_poll=20
             )
             sent = POSTED_BODIES[0] if POSTED_BODIES else {}
             check(
@@ -1258,9 +1260,11 @@ def check_bugfixes(check) -> None:
             check("整条链路仍然跑得通（不是把请求弄坏了）", bare.get("ok") is True, str(bare)[:160])
 
             POSTED_BODIES.clear()
+            filled_spec = video_spec({"duration": 5, "ratio": "16:9"})
+            probe_cfg.pools["video"].models = [filled_spec]
             filled = probe.deep_probe(
                 probe_cfg,
-                video_spec({"duration": 5, "ratio": "16:9"}),
+                filled_spec,
                 "自检用视频",
                 timeout=10,
                 poll_interval=1,

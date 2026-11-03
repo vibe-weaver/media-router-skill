@@ -1950,7 +1950,7 @@ async function testModel(box, payload, deep){
   if(deep){
     const ok = await uiConfirm(
       "真实测试确认",
-      "将真实生成一次来验证全链路（提交→推理→下载→落盘），会消耗少量额度。继续吗？",
+      "只使用已保存且启用的配置，未保存改动不参与；如需测试更改，请先保存再测。将真实生成一次来验证全链路（提交→推理→下载→落盘），会消耗少量额度。继续吗？",
       "开始真实测试"
     );
     if(!ok) return;
@@ -1963,7 +1963,7 @@ async function testModel(box, payload, deep){
           : "正在测试…（不会生成任何内容，不消耗额度）")+'</div>', box);
   try{
     const res = await api("/api/model/test", {
-      method:"POST", body:JSON.stringify(Object.assign({}, payload, {deep: !!deep, fail_fast: failFast}))
+      method:"POST", body:JSON.stringify({id: mid, deep: !!deep, fail_fast: failFast})
     });
     if(deep){
       let html = "";

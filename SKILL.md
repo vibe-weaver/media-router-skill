@@ -53,8 +53,12 @@ python3 "<SKILL_DIR>/scripts/media_router.py" generate --kind video --prompt "�
 - stdout 是单个 JSON；下方结果表仅适用于 `generate`。`prompts search`／`prompts show` 的 `status=ok` 只表示资料读取／检索成功，不表示媒体生成成功；`kind=prompt_library` 错误按上述资料降级处理，不等于缺 Key，不套用下方生成错误规则。日志在 stderr，不要解析。
 - 图生图/图生视频：加 `--image <绝对路径或 URL>`。
 - 常用参数：`--size`、`--negative-prompt`、`--count`、`--output-dir`、`--max-attempts`、`--fail-fast`、
-  `--param key=value`。`--param` 是「点名发给接口的字段」：适配器认识的键优先，
-  其余键也会原样透传（火山视频按 `--key value` 拼进提示词），日志里会写出透了哪些。
+  `--param key=value`。`--param` 是「点名发给接口的运行参数」：适配器认识的键优先，
+  其余键按平台透传（火山视频按 `--key value` 拼进提示词），日志里会写出透了哪些。
+  **不能用它换模型或计费资源**：`model`／`model_name`／`model_id`／`version`／
+  `resource_id`／`endpoint`／凭据类字段会被直接拒绝，错误出现在取 Key 之前，
+  不会拿同一个参数去试下一个候选。自定义接口（`generic_http`）的额外参数还必须先在
+  配置的 `options.allowed_params` 里声明，否则同样拒绝。
 - `--kind` 支持 `image` / `video` / `audio`。语音的通路：`dashscope`
   （qwen-audio-*-tts-*、qwen3-tts-*）、`openai`（`/v1/audio/speech`）、
   `kling`（`/audio/tts`，异步任务，`params.voice_id` 必填，语言默认 zh）、
@@ -64,7 +68,7 @@ python3 "<SKILL_DIR>/scripts/media_router.py" generate --kind video --prompt "�
   要换就写 `--param voice=xxx` / `--param response_format=wav`。
   配置里若挂了别的平台的 TTS（replicate、fal 等协议各不相同），会明确报
   「该类目还没有接入适配器」，别当成密钥问题反复重试。
-- `--model <id>` 只能填 `list` 里已有的 id；没配过的 id 会被拒绝。
+- `--model <id>` 只能填 `list` 里已有且**已启用**的 id；没配过或已停用的 id 会被拒绝。
 - 产物默认落盘到当前目录的 `./outputs/image/`、`./outputs/video/`（按类目分子目录）；
   stdout 的 `files[].path` 是绝对路径。
 - 视频可能要 1–3 分钟；脚本内部已轮询，**不要**在外面套 sleep 重试。
@@ -112,11 +116,14 @@ python3 "<SKILL_DIR>/scripts/media_router.py" generate --kind video --prompt "�
   不要靠模型名猜。内置兜底（`provider: native`）没有这两个字段 —— 它不调接口，
   看到 `provider: native` 就直接走 delegate。
 - 要接新平台：`references/providers.md` 和 `references/setup.md`。
-- **改配置是用户的事**：不要擅自改 `config/models.yaml`、权重或优先级。
+- **改配置是用户的事**：不要擅自改 `config/models.yaml`、权重或优先级，也不要为了绕开
+  参数检查去改模型条目、`options.allowed_params`、接口地址或密钥。
 
 ## 硬性约束
 
-- 只能调用配置里已有的模型；不许猜模型名，也不许绕过脚本直接 POST 第三方接口。
+- 只能调用配置里已有且已启用的模型；不许猜模型名，也不许绕过脚本直接 POST 第三方接口。
+- 不要用 `--param`、自定义接口模板或网页测试入口去调用用户没有配置的模型；提示词里
+  写“换模型”不改变授权，真实测试也只使用已保存且启用的条目。
 - 缺 Key 不要硬试，也不要假装成功。
 - 第三方生成计费：用户只是“问问能不能”时不要真跑；批量生成前先确认。
 - 没有 `files[].path` 就没有产物。

@@ -43,6 +43,7 @@ REQUIRED = {
     "scripts/media_router.py",
     "scripts/mrouter/config.py",
     "scripts/mrouter/cli.py",
+    "scripts/mrouter/policy.py",
     "scripts/mrouter/diagnostics.py",
     "scripts/mrouter/lifecycle.py",
     "scripts/mrouter/outcomes.py",
@@ -145,7 +146,7 @@ with tempfile.TemporaryDirectory(prefix="mr-build-test-") as tmp:
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["MEDIA_ROUTER_CONFIG_DIR"] = str(Path(tmp) / "empty-config")
     imported = subprocess.run(
-        [sys.executable, "-B", "-c", "from mrouter import cli, diagnostics, outcomes"],
+        [sys.executable, "-B", "-c", "from mrouter import cli, diagnostics, outcomes, policy"],
         cwd=tmp, env=env, timeout=30,
     )
     check(imported.returncode == 0, "隔离进程只从运行时包成功导入 CLI/诊断/验收模块")
