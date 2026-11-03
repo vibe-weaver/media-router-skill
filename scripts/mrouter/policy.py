@@ -190,16 +190,58 @@ def _model_fields(options: dict) -> tuple:
     return tuple(out)
 
 
-def _walk_leaves(node: Any, prefix: tuple = ()):
+def _placeholders_in(node: Any) -> set:
+    """收集一个值（含嵌套结构）里出现的所有占位符名。"""
+    if isinstance(node, str):
+        return set(_PLACEHOLDER_RE.findall(node))
+    if isinstance(node, dict):
+        found: set = set()
+        for value in node.values():
+            found |= _placeholders_in(value)
+        return found
+    if isinstance(node, list):
+        found = set()
+        for value in node:
+            found |= _placeholders_in(value)
+        return found
+    return set()
+
+
+def _render_value(node: Any, model: str) -> Any:
+    """只替换 ``{{model}}``；用于把可信模板渲染成期望身份值。"""
+    if isinstance(node, str):
+        return _render_model(node, model)
+    if isinstance(node, dict):
+        return {key: _render_value(value, model) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_render_value(value, model) for value in node]
+    return node
+
+
+def _walk_identity_slots(node: Any, prefix: tuple = ()):
+    """产出 ``(路径, 值)``：身份命名的字段整体算一个槽，其它字段只收含 ``{{model}}`` 的叶子。
+
+    身份字段的值本身可能是对象（例如 ``model: {id: "{{model}}"}``）。这时必须把
+    整个对象当作一个身份槽，与提交守卫里"按字段名整块记录"的口径一致；否则会
+    把配置合法的嵌套写法误判成"多出未批准字段"。
+    """
     if isinstance(node, dict):
         for key, value in node.items():
-            yield from _walk_leaves(value, prefix + (key,))
+            path = prefix + (key,)
+            if is_identity_key(key):
+                yield path, value
+                continue
+            if isinstance(value, (dict, list)):
+                yield from _walk_identity_slots(value, path)
+            elif isinstance(value, str) and "model" in _placeholders_in(value):
+                yield path, value
         return
     if isinstance(node, list):
         for index, value in enumerate(node):
-            yield from _walk_leaves(value, prefix + (index,))
-        return
-    yield prefix, node
+            if isinstance(value, (dict, list)):
+                yield from _walk_identity_slots(value, prefix + (index,))
+            elif isinstance(value, str) and "model" in _placeholders_in(value):
+                yield prefix + (index,), value
 
 
 def _resolve_path(node: Any, path: tuple) -> Any:
@@ -238,29 +280,31 @@ def generic_contract(spec: ModelSpec) -> GenericContract:
     fields: list[tuple] = []
     protected: set = set()
 
-    for path, value in _walk_leaves(body):
-        if not isinstance(value, str):
-            continue
-        tokens = set(_PLACEHOLDER_RE.findall(value))
-        looks_identity = is_identity_key(path[-1]) if path else False
+    identity_paths: list[tuple] = []
+    for path, value in _walk_identity_slots(body):
+        tokens = _placeholders_in(value)
+        identity_paths.append(tuple(path))
         if "model" in tokens:
             if tokens - {"model"}:
                 raise ConfigError(
                     "自定义接口里含 {{model}} 的字段不能再混入 prompt/duration 等运行变量："
                     + _path_text(path)
                 )
-            expected = _render_model(value, model)
-            if not expected:
+            expected = _render_value(value, model)
+            if expected == "":
                 raise ConfigError("自定义接口的模型字段渲染为空：" + _path_text(path))
             fields.append(("json_body", tuple(path), expected))
             protected.add(path[0])
-        elif looks_identity:
-            if tokens:
-                raise ConfigError(
-                    "自定义接口的模型字段只能使用可信配置或 {{model}}：" + _path_text(path)
-                )
-            fields.append(("json_body", tuple(path), MISSING if value == "" else value))
-            protected.add(path[0])
+            continue
+        if not is_identity_key(path[-1]):
+            continue
+        if tokens:
+            raise ConfigError(
+                "自定义接口的模型字段只能使用可信配置或 {{model}}：" + _path_text(path)
+            )
+        fields.append(("json_body", tuple(path),
+                       MISSING if value == "" else copy.deepcopy(value)))
+        protected.add(path[0])
 
     for dotted in _model_fields(options):
         path = tuple(dotted.split("."))
@@ -269,6 +313,10 @@ def generic_contract(spec: ModelSpec) -> GenericContract:
             raise ConfigError(
                 f"自定义接口的 options.model_fields 指向的字段不存在或不是字符串：{dotted}"
             )
+        covered = any(path[:len(slot)] == slot for slot in identity_paths)
+        if covered:
+            # 整块身份槽已经覆盖这个叶子，重复登记只会让守卫两套口径打架。
+            continue
         tokens = set(_PLACEHOLDER_RE.findall(value))
         if tokens - {"model"}:
             raise ConfigError(f"自定义接口的 options.model_fields 不能依赖运行变量：{dotted}")

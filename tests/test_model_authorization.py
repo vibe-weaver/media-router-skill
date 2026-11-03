@@ -13,7 +13,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 from mrouter import adapters, cli, config, transport
-from mrouter.adapters import GenResult
+from mrouter.adapters import GenRequest, GenResult
 from mrouter.config import ConfigError, ModelSpec, Pool, RouterConfig
 
 
@@ -117,6 +117,22 @@ class ModelAuthorizationTests(unittest.TestCase):
         self.assertIn("不一致", result["error"])
         key.assert_not_called()
         adapter.assert_not_called()
+
+    def test_run_adapter_honors_explicit_spec_for_embedding(self):
+        """run_adapter 是库入口：调用方传入的 spec 必须被沿用，不能被静默替换。
+
+        用户可见的执行入口（CLI / 网页 / 探测）各自在拿到 spec 时做启用授权；
+        如果 run_adapter 再按 id 重查配置，内部组合（自检、嵌入调用）会被换掉。
+        """
+        synthetic = ModelSpec("synthetic", "generic_http", "image", model="synthetic-model",
+                              endpoint="https://offline.invalid/submit")
+        req = GenRequest(kind="image", prompt="offline embedding audit")
+        ctx = adapters.Ctx(api_key="synthetic", key_source="offline", timeout=1,
+                           poll_interval=0, max_poll=1)
+        with patch.object(adapters, "request", side_effect=RuntimeError("captured")) as request:
+            with self.assertRaises(RuntimeError):
+                adapters.run_adapter(synthetic, req, self.cfg, ctx)
+        self.assertEqual(request.call_count, 1)
 
     def test_execution_helper_returns_canonical_but_lookup_still_reads_disabled(self):
         helper = getattr(self.cfg, "require_enabled_model", None)

@@ -287,6 +287,18 @@ class SubmissionIdentityTests(unittest.TestCase):
                 with self.assertRaises(ConfigError):
                     policy.validate_request_params({name: "unapproved-value"})
 
+    def test_generic_nested_model_object_template_is_preserved(self):
+        options = {"submit": {"body": {"model": {"id": "{{ model }}"}, "prompt": "{{prompt}}"}},
+                   "allowed_params": ["seed"]}
+        _, _, kwargs = self.captured(self.spec("generic_http", options=options), extra={"seed": 0})
+        self.assertEqual(kwargs["json_body"]["model"], {"id": "approved-model"})
+        literal = {"submit": {"body": {"model": {"id": "fixed-alias"}}},
+                   "model_fields": ["model.id"], "allowed_params": []}
+        _, _, kwargs = self.captured(self.spec("generic_http", options=literal))
+        self.assertEqual(kwargs["json_body"]["model"], {"id": "fixed-alias"})
+        self.assert_blocked(self.spec("generic_http", options={
+            "submit": {"body": {"model": {"id": "{{prompt}}"}}}, "allowed_params": []}), {})
+
     def test_all_fifteen_adapter_submission_sites_supply_working_identity(self):
         cases = [("openai", "image", False), ("openai", "image", True), ("openai", "video", False),
                  ("openai", "audio", False), ("dashscope", "audio", False),

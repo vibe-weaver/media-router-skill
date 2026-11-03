@@ -67,6 +67,7 @@
 命令行 `--duration` / `--size` / `--param key=value` 对视频都生效，
 优先级是 `--param` > 专用旗标 > `params`。`--param` 里适配器没显式处理的键也会
 原样写进请求体（火山 Seedance 是按 `--key value` 拼进提示词），stderr 日志会列出透了哪些字段。
+模型、接口地址、凭据和计费资源类字段是例外：它们会被直接拒绝，不能在生成时改换。
 
 ```yaml
 # OpenAI 官方
@@ -280,6 +281,7 @@ params  <  options.inputs  <  --param key=value  <  req.extra.inputs
 ```
 
 也就是说，命令行点名了哪个字段，就一定用命令行的值。
+身份类字段（模型/版本/地址/计费资源/凭据）不适用这条：它们只能由配置决定，命令行传入会被拒绝。
 
 ### `--duration` / `--count` 落到哪个字段
 

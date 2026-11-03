@@ -2858,11 +2858,13 @@ for _provider in ("volcengine", "ark", "doubao"):
 def run_adapter(
     spec: ModelSpec, req: GenRequest, cfg: RouterConfig, ctx: Ctx
 ) -> GenResult:
-    """按 provider 派发；未知 provider 直接报错，避免静默走错通道。"""
-    if cfg is not None:
-        # 执行入口再按 id 取一次配置里的 canonical 条目：调用方传进来的对象
-        # 即使被伪造，也不能用它绕过停用状态或类目限制。
-        spec = cfg.require_enabled_model(spec.id, kind=req.kind)
+    """按 provider 派发；未知 provider 直接报错，避免静默走错通道。
+
+    这里**不**按 id 重新查配置：``spec`` 是调用方明确要求执行的对象，静默换成
+    配置里的同 id 条目会让嵌入调用、自检夹具和参数覆盖都变得不可预期。
+    用户可见的入口（CLI 的 ``--model``、网页真实测试、``deep_probe``）已经在
+    拿到 id 时走 ``require_enabled_model`` 完成启用授权。
+    """
     adapter = ADAPTERS.get(spec.provider)
     if adapter is None:
         raise HttpError(
