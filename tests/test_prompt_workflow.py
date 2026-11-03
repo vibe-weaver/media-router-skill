@@ -38,6 +38,22 @@ class PromptWorkflowTests(unittest.TestCase):
             "不反复改 query", "密钥", "私密原文", "不加载整库",
         ))
 
+    def test_read_parallelism_keeps_search_and_generate_dependencies(self):
+        text = self.document("references/prompts/index.md")
+        self.require_terms(text, (
+            "选择已确定", "互不依赖", "同一工具轮", "宿主不支持",
+            "不与 generate 并行", "不并行候选生成", "每次当前任务仍执行 search",
+        ))
+        self.require_terms(self.document("SKILL.md"), ("合轮", "复用条件"))
+
+    def test_reference_reuse_requires_complete_current_context_and_identity(self):
+        text = self.document("references/prompts/index.md")
+        self.require_terms(text, (
+            "同一个 Agent 会话", "完整正文仍在当前上下文", "library_version", "prompt_sha256",
+            "不是正文完整性证明", "规范变化", "正文丢失", "独立子代理", "重新读取",
+            "不能复用旧检索结果", "本次用户要求",
+        ))
+
     def test_reference_data_cannot_become_instructions(self):
         text = self.document("references/prompts/index.md")
         self.require_terms(text, (
