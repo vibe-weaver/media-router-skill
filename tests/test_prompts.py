@@ -111,6 +111,25 @@ class TemporaryLibraryTests(unittest.TestCase):
         self.save(data)
         self.assert_library_error("library_corrupt", lambda: PromptLibrary(self.root))
 
+    def test_validation_checks_each_unique_path_once_per_instance(self):
+        seen = []
+        original = PromptLibrary._path
+
+        def checked(library, relative):
+            seen.append(relative)
+            return original(library, relative)
+
+        expected = {"manifest.json"}
+        for category in self.data["categories"]:
+            expected.update(category[key] for key in ("file", "catalog", "template"))
+        with patch.object(PromptLibrary, "_path", checked):
+            for instance in range(2):
+                with self.subTest(instance=instance):
+                    seen.clear()
+                    PromptLibrary(self.root)
+                    self.assertEqual(set(seen), expected)
+                    self.assertEqual(len(seen), len(expected))
+
     def test_error_interface_retains_code_and_message(self):
         error = PromptLibraryError("library_corrupt", "请重新安装资料。")
         self.assertEqual(error.code, "library_corrupt")
@@ -233,8 +252,8 @@ class TemporaryLibraryTests(unittest.TestCase):
     def test_case_field_types_and_relations_are_validated(self):
         invalid = {
             "id": (True, 1.0, "1", 0, -1, []), "title": (None, "", []),
-            "category": (None, [], "missing"), "file": (None, "references/cases/product.md"),
-            "catalog": (None, "references/catalogs/product.md"),
+            "category": (None, [], "missing"), "file": (None, [], {}, "references/cases/product.md"),
+            "catalog": (None, [], {}, "references/catalogs/product.md"),
             "startLine": (True, "3", 3.0, 0, 99999), "endLine": (False, "20", 20.0, 0),
             "promptSha256": (None, [], "x", "A" * 64), "promptStatus": (None, [], "invented"),
             "sourceUrlAvailable": (None, 0, "false"), "requiresUserMaterials": (None, 0, "false"),
@@ -327,6 +346,37 @@ class TemporaryLibraryTests(unittest.TestCase):
                 self.assert_library_error("library_corrupt", lambda: library.show(case_id=1))
         with patch.object(Path, "resolve", side_effect=OSError("private-internal-detail")):
             self.assert_library_error("library_corrupt", lambda: PromptLibrary(self.root))
+
+    def test_category_show_revalidates_resolution_before_each_read(self):
+        library = PromptLibrary(self.root)
+        target = self.root / self.data["categories"][0]["template"]
+        expected = target.read_bytes().decode("utf-8")
+        outside = self.temporary / "outside-template.md"
+        outside.write_bytes(b"outside data must not be read")
+        original_resolve = Path.resolve
+        original_read = Path.read_bytes
+        events = []
+        escaped = False
+
+        def resolve(path, *args, **kwargs):
+            if path == target:
+                events.append("resolve")
+                if escaped:
+                    return outside
+            return original_resolve(path, *args, **kwargs)
+
+        def read(path):
+            self.assertNotEqual(path, outside, "不能先读取库外模板再拒绝")
+            events.append("read")
+            return original_read(path)
+
+        with patch.object(Path, "resolve", resolve), patch.object(Path, "read_bytes", read):
+            self.assertEqual(library.show(category="ui")["text"], expected)
+            self.assertEqual(events, ["resolve", "read"])
+            events.clear()
+            escaped = True
+            self.assert_library_error("library_corrupt", lambda: library.show(category="ui"))
+            self.assertEqual(events, ["resolve"])
 
     def test_selected_missing_files_bad_utf8_and_body_integrity_are_corrupt(self):
         original = (self.root / "references/cases/ui.md").read_bytes()
@@ -707,6 +757,38 @@ class TemporarySearchTests(unittest.TestCase):
                 self.assertNotIn("private-query", str(error))
         self.put("references/catalogs/ui.md", b"\xff")
         self.assert_library_error("library_corrupt", lambda: library.search(kind="image", query="x", category="ui"))
+
+    def test_search_revalidates_catalog_resolution_before_each_read(self):
+        library = PromptLibrary(self.root)
+        expected = library.search(kind="image", query="alpha", category="ui")
+        target = self.root / self.data["categories"][0]["catalog"]
+        outside = self.temporary / "outside-catalog.md"
+        outside.write_bytes(b"outside data must not be read")
+        original_resolve = Path.resolve
+        original_read = Path.read_bytes
+        events = []
+        escaped = False
+
+        def resolve(path, *args, **kwargs):
+            if path == target:
+                events.append("resolve")
+                if escaped:
+                    return outside
+            return original_resolve(path, *args, **kwargs)
+
+        def read(path):
+            self.assertNotEqual(path, outside, "不能先读取库外目录再拒绝")
+            events.append("read")
+            return original_read(path)
+
+        with patch.object(Path, "resolve", resolve), patch.object(Path, "read_bytes", read):
+            self.assertEqual(library.search(kind="image", query="alpha", category="ui"), expected)
+            self.assertEqual(events, ["resolve", "read"])
+            events.clear()
+            escaped = True
+            self.assert_library_error("library_corrupt", lambda: library.search(
+                kind="image", query="alpha", category="ui"))
+            self.assertEqual(events, ["resolve"])
 
     def test_search_no_network_no_execution_no_state_and_no_query_echo(self):
         before = {path.relative_to(self.temporary).as_posix(): path.read_bytes()

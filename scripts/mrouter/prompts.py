@@ -128,6 +128,15 @@ class PromptLibrary:
             _corrupt()
 
     def _validate(self) -> None:
+        checked_paths = set()
+
+        def check_path(relative):
+            if not isinstance(relative, str):
+                _corrupt()
+            if relative not in checked_paths:
+                self._path(relative)
+                checked_paths.add(relative)
+
         data = self.data
         if not isinstance(data, dict) or type(data.get("formatVersion")) is not int or data["formatVersion"] != 1:
             _corrupt()
@@ -155,7 +164,7 @@ class PromptLibrary:
             if type(category.get("count")) is not int or category["count"] < 0:
                 _corrupt()
             for key in ("file", "catalog", "template"):
-                self._path(category[key])
+                check_path(category[key])
             self.categories[slug] = category
             sources[category["source"]] = slug
 
@@ -188,7 +197,7 @@ class PromptLibrary:
             slug = sources[case["category"]]
             category = self.categories[slug]
             for key in ("file", "catalog"):
-                self._path(case.get(key))
+                check_path(case.get(key))
                 if case[key] != category[key]:
                     _corrupt()
             self.cases[cid] = case
