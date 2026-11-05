@@ -9,7 +9,7 @@ from http.client import IncompleteRead
 from typing import Any
 
 from .config import ConfigError
-from .transport import gateway_html_hint, html_summary, redact
+from .transport import gateway_html_hint, html_label, html_summary, redact
 
 # 顶层 InvalidParameter 本身不是确定的配置证据，须结合具体字段校验信息。
 CONFIG_ERROR_CODES = {
@@ -53,8 +53,12 @@ def vendor_error_code(exc: Exception) -> str:
 
 
 def _html_plain(body: str, limit: int = 120) -> str:
-    """把 HTML 压成一行可读文本，供诊断展示；不执行脚本/样式内容。"""
-    text = re.sub(r"(?is)<(?:script|style)[^>]*>.*?</(?:script|style)>", " ", body)
+    """把 HTML 压成一行可读文本，供诊断展示；不执行脚本/样式内容。
+
+    诊断拿到的 body 常被截断在 800 字符，``</script>`` 可能已经丢了；
+    这里允许“脚本块一直延伸到结尾”，否则 JS 源码会被当成可见文字展示。
+    """
+    text = re.sub(r"(?is)<(?:script|style)[^>]*>.*?(?:</(?:script|style)>|$)", " ", body)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
     return " ".join(text.split())[:limit]
 
@@ -71,7 +75,7 @@ def vendor_error_detail(exc: Exception) -> str:
         if plain.startswith(page):
             plain = plain[len(page):].strip()
         suffix = f"：{plain}" if plain else ""
-        return redact(f"HTML 页面（{page}）{suffix}")[:200]
+        return redact(f"{html_label(body)}{suffix}")[:200]
     payload = error_payload(exc)
     if payload:
         code = payload.get("code") or payload.get("error_code") or ""
@@ -116,6 +120,7 @@ def diagnose_error(exc: Exception) -> dict[str, Any]:
     detail = vendor_error_detail(exc) or redact(str(exc))
     body_text = str(getattr(exc, "body", "") or "")
     page = html_summary(body_text)
+    label = html_label(body_text)
     gateway = gateway_html_hint(body_text)
     evidence = redact(
         f"{json.dumps(error_payload(exc), ensure_ascii=False)} "
@@ -130,13 +135,13 @@ def diagnose_error(exc: Exception) -> dict[str, Any]:
     if uncertain:
         kind, category = "uncertain", "submission_uncertain"
         if page:
-            summary = f"提交结果不确定：响应是 HTML 页面（{page}）"
+            summary = f"提交结果不确定：响应是 {label}"
             hint = (
                 "接口地址可能填成了网页地址，或请求被登录页、代理、防火墙拦截。"
                 "HTTP 2xx 仍不能证明平台未受理：请先核对平台任务与计费，确认前不要重跑或切换模型。"
             )
             if gateway:
-                hint += " " + gateway + "。"
+                hint += gateway + "。"
         else:
             summary = "提交结果不确定，平台可能已经受理并计费"
             hint = "请先到平台控制台确认任务是否已创建及计费状态；确认前不要再次生成或切换候选重跑。"
@@ -150,7 +155,7 @@ def diagnose_error(exc: Exception) -> dict[str, Any]:
         hint = "请按错误原文检查当前配置与调用参数，修正后再执行。"
     elif page:
         kind, category = "runtime", "html_response"
-        summary = f"接口返回 HTML 页面而不是 JSON（{page}）"
+        summary = f"接口返回 {label} 而不是 JSON"
         hint = (
             "接口地址可能填成了网页地址，或请求被登录页、代理、防火墙拦截；"
             "请核对 endpoint、代理与网络登录状态后再试。"

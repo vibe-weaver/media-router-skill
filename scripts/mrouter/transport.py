@@ -112,7 +112,15 @@ def html_summary(body: str) -> str:
     return "HTML 页面"
 
 
-_GATEWAY_TITLE = re.compile(r"(?i)\b(?:new\s*api|one\s*api|newapi|oneapi)\b")
+def html_label(body: str) -> str:
+    """HTML 响应的人类可读标签：有标题时带上标题，没有标题时只写「HTML 页面」。"""
+    page = html_summary(body)
+    if not page:
+        return ""
+    return "HTML 页面" if page == "HTML 页面" else f"HTML 页面（{page}）"
+
+
+_GATEWAY_TITLE = re.compile(r"(?i)\b(?:new[\s_-]*api|one[\s_-]*api)\b")
 
 
 def gateway_html_hint(body: str) -> str:
@@ -231,7 +239,7 @@ class HttpResponse:
             page = html_summary(self.text)
             if page:
                 message = (
-                    f"响应不是 JSON，而是 HTML 页面（{page}）："
+                    f"响应不是 JSON，而是 {html_label(self.text)}："
                     "接口地址可能填成了网页地址，或请求被登录页、代理、防火墙拦截"
                 )
                 gateway = gateway_html_hint(self.text)

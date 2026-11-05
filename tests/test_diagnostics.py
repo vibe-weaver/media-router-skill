@@ -220,6 +220,30 @@ class DiagnosticTests(unittest.TestCase):
         self.assertIn("/v1/images/generations", diag["hint"])
         self.assertIn("/v1/audio/speech", diag["hint"])
 
+    def test_html_without_title_does_not_duplicate_label(self):
+        body = "<!doctype html><html><body><p>login required</p></body></html>"
+        diag = self.diagnose(HttpError("响应不是 JSON", 200, body, submission_uncertain=True))
+        combined = diag["summary"] + diag["detail"]
+        self.assertNotIn("HTML 页面（HTML 页面）", combined)
+        self.assertIn("HTML 页面", diag["summary"])
+        self.assertIn("login required", diag["detail"])
+
+    def test_html_detail_drops_scripts_even_when_body_is_truncated(self):
+        truncated = (
+            "<html><head><title>New API</title></head><body>"
+            "<script>const cookie = document.cookie.match(/x/);"
+        )
+        diag = self.diagnose(HttpError("响应不是 JSON", 200, truncated, submission_uncertain=True))
+        self.assertIn("New API", diag["detail"])
+        self.assertNotIn("document.cookie", diag["detail"])
+        closed = (
+            "<html><head><title>New API</title></head><body>"
+            "<script>bad()</script><p>请先登录</p></body></html>"
+        )
+        diag = self.diagnose(HttpError("响应不是 JSON", 200, closed, submission_uncertain=True))
+        self.assertNotIn("bad()", diag["detail"])
+        self.assertIn("请先登录", diag["detail"])
+
     def test_unknown_errors_do_not_guess_config_root_cause(self):
         for exc in (RuntimeError("unknown vendor failure"), vendor_error(400, {"code": "Mystery", "message": "unknown"}),
                     vendor_error(404, {"message": "not found"}), vendor_error(503, {"message": "gateway down"})):
