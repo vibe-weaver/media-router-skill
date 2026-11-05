@@ -179,6 +179,38 @@ class RequestSafetyTests(unittest.TestCase):
                 self.assertEqual(response.method, method.upper())
                 self.assertEqual(response.json(), {"ok": True})
 
+    def test_html_submission_response_is_uncertain_with_actionable_hint(self):
+        body = (
+            b'<!doctype html><html><head><title>Proxy Login</title></head><body>'
+            b'<a href="https://login.invalid/?token=page-secret">login</a></body></html>'
+        )
+        raw = Response(body)
+        raw.status = 200
+        raw.headers = {"Content-Type": "text/html"}
+        with patch.object(transport, "open_request", return_value=raw):
+            with self.assertRaises(transport.HttpError) as cm:
+                transport.request(
+                    "POST", "https://stub.invalid/submit", generation_submission=True
+                ).json()
+        self.assertTrue(cm.exception.submission_uncertain)
+        text = str(cm.exception)
+        self.assertIn("HTML", text)
+        self.assertIn("接口地址", text)
+        self.assertIn("代理", text)
+        self.assertIn(transport._SUBMISSION_HINT, text)
+        self.assertNotIn("page-secret", text)
+        self.assertNotIn("page-secret", cm.exception.body)
+
+    def test_html_non_submission_response_is_not_uncertain(self):
+        raw = Response(b"<html><head><title>Gateway</title></head><body>maintenance</body></html>")
+        raw.status = 200
+        with patch.object(transport, "open_request", return_value=raw):
+            with self.assertRaises(transport.HttpError) as cm:
+                transport.request("GET", "https://stub.invalid/query").json()
+        self.assertFalse(cm.exception.submission_uncertain)
+        self.assertIn("HTML", str(cm.exception))
+        self.assertNotIn(transport._SUBMISSION_HINT, str(cm.exception))
+
     def test_request_keeps_binary_body_unparsed_and_records_method(self):
         body = b"RIFF\x00\xffWAVEbinary-audio"
         for method in ("POST", "PATCH", "GET"):

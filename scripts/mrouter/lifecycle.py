@@ -133,8 +133,15 @@ def generation_attempt():
         if not state.generated and not state.unresolved:
             raise
         phase = "partial" if state.generated and state.phase != "delivery" else state.phase
+        # 没有产物时不要说成“已产生结果”：提交响应是 HTML、查询失败这类情况
+        # 只是受理状态未确认，误导成“已经出图”会让人以为可以直接取回。
+        summary = (
+            "已产生部分或全部产物，已停止后续生成"
+            if state.generated
+            else "提交后任务状态尚未确认，已停止后续生成"
+        )
         raise GenerationInterrupted(
-            f"生成已产生结果或任务尚未确认，已停止后续生成：{type(exc).__name__}: {exc}",
+            f"{summary}：{type(exc).__name__}: {exc}",
             files=state.files, urls=state.urls, tasks=state.tasks, phase=phase,
             submission_uncertain=uncertain, status=getattr(exc, "status", None),
             body=getattr(exc, "body", ""),

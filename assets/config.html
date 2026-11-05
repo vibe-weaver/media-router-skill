@@ -1982,7 +1982,8 @@ async function testModel(box, payload, deep){
       if(real.diagnostic){
         const d = real.diagnostic;
         html += '<div class="note err">'+esc(d.summary || "诊断")+
-          (d.detail ? '<br>厂商原文：'+esc(d.detail) : '')+'</div>';
+          (d.detail ? '<br>厂商原文：'+esc(d.detail) : '')+
+          (d.hint ? '<br>建议：'+esc(d.hint) : '')+'</div>';
       }
       if(real.elapsed_ms !== undefined) html += '<div class="hint">生成阶段耗时：'+esc(real.elapsed_ms)+' ms</div>';
       if(res.elapsed_ms !== undefined) html += '<div class="hint">总耗时（含预检）：'+esc(res.elapsed_ms)+' ms</div>';

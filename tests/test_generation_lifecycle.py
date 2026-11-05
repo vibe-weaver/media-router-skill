@@ -412,6 +412,9 @@ class GenerationLifecycleTests(unittest.TestCase):
         self.assertEqual(len(outcomes), 2)
         self.assertTrue(any("accepted-but" in message and uncertain for message, uncertain in outcomes))
         self.assertTrue(any("before-submission" in message and not uncertain for message, uncertain in outcomes))
+        self.assertTrue(any("提交后任务状态尚未确认" in message for message, uncertain in outcomes if uncertain),
+                        "尚未产生产物时不要把提示写成『已产生结果』")
+        self.assertFalse(any("生成已产生结果" in message for message, _ in outcomes))
         with patch.dict(adapters.ADAPTERS, {"openai": lambda *args: (_ for _ in ()).throw(RuntimeError("next-clean-candidate"))}):
             with self.assertRaises(RuntimeError) as caught:
                 adapters.run_adapter(spec, req, None, ctx)

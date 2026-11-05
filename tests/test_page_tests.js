@@ -161,6 +161,17 @@ const watchdog = setTimeout(() => { console.error('测试未完成（未决Promi
     assert(!s.box.innerHTML.includes('本次生成成功'));
     assert(s.buttons.every(b => !b.disabled));
   });
+  await test('真实错误显示诊断建议并保持转义', async () => {
+    const hint = '接口地址可能填成了网页地址，或请求被登录页、代理、防火墙拦截。';
+    const s = setup(async () => true, () => ({ok:false, real_call:{ok:false,
+      error:'提交结果不确定', diagnostic:{summary:'提交结果不确定：响应是 HTML 页面（Proxy Login）',
+      detail:'HTML 页面（Proxy Login）：请先登录网络', hint}}}));
+    await s.context.run(s.box, {id:'tts'}, true);
+    assert(s.box.innerHTML.includes('建议'));
+    assert(s.box.innerHTML.includes('接口地址'));
+    assert(s.box.innerHTML.includes('代理'));
+    assert(!s.box.innerHTML.includes('<script>'));
+  });
   await test('请求抛错后可再次确认且按钮解锁', async () => {
     let confirmations = 0;
     const s = setup(async () => { confirmations++; return true; }, () => { throw Error('offline'); });

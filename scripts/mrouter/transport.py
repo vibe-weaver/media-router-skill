@@ -89,6 +89,29 @@ def redact(text: str, *, mask_signature: bool = True) -> str:
     return cleaned
 
 
+_HTML_START = re.compile(r"(?is)^[\s\ufeff]*(?:<!doctype\s+html\b|<html\b)")
+_HTML_TITLE = re.compile(r"(?is)<title[^>]*>(.*?)</title>")
+_HTML_TAG = re.compile(r"(?s)<[^>]+>")
+
+
+def html_summary(body: str) -> str:
+    """识别 HTML 响应并给出简短标题；不是 HTML 时返回空串。
+
+    只用于错误信息与诊断，不执行页面里的任何内容。返回空串即"不像 HTML"，
+    调用方应继续按普通非 JSON 响应处理。
+    """
+    text = str(body or "")[:4000]
+    if not _HTML_START.match(text):
+        return ""
+    match = _HTML_TITLE.search(text)
+    if match:
+        title = " ".join(_HTML_TAG.sub(" ", match.group(1)).split())
+        title = redact(title)[:80]
+        if title:
+            return title
+    return "HTML 页面"
+
+
 def _is_loopback_url(url: str) -> bool:
     host = (urllib.parse.urlparse(str(url)).hostname or "").lower()
     if host in ("localhost", "::1"):
@@ -146,11 +169,15 @@ class HttpError(RuntimeError):
     """HTTP 层错误，带上状态码与响应片段方便定位。"""
 
     def __init__(
-        self, message: str, status: int | None = None, body: str = "", *,
+        self, message: str, status: int | None = None, body: str | bytes = "", *,
         submission_uncertain: bool = False,
     ):
         super().__init__(redact(message))
         self.status = status
+        if isinstance(body, (bytes, bytearray)):
+            # 调用方传原始字节时先解码：str(b"...") 会留下 b'' 外壳，
+            # 既不利于展示，也会让 HTML 页面识别失效。
+            body = bytes(body).decode("utf-8", errors="replace")
         self.body = redact(body or "")[:800]
         self.submission_uncertain = bool(submission_uncertain)
 
@@ -187,6 +214,17 @@ class HttpResponse:
         try:
             return json.loads(self.body.decode("utf-8", errors="replace"))
         except json.JSONDecodeError as exc:
+            page = html_summary(self.text)
+            if page:
+                message = (
+                    f"响应不是 JSON，而是 HTML 页面（{page}）："
+                    "接口地址可能填成了网页地址，或请求被登录页、代理、防火墙拦截"
+                )
+                if uncertain:
+                    message += f"\n{_SUBMISSION_HINT}"
+                raise HttpError(
+                    message, self.status, self.text, submission_uncertain=uncertain
+                ) from exc
             raise HttpError(
                 f"响应不是合法 JSON：{redact(self.text[:300])}{hint}", self.status, self.text,
                 submission_uncertain=uncertain,

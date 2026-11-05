@@ -189,6 +189,30 @@ class DiagnosticTests(unittest.TestCase):
                 self.assertIn("不要", diag["hint"])
                 self.assertIn(payload["message"], diag["detail"])
 
+    def test_html_submission_uncertainty_is_actionable_and_compact(self):
+        body = (
+            '<!doctype html><html><head><title>Proxy Login</title></head><body>'
+            '<p>请先登录网络</p><a href="https://login.invalid/?token=page-secret">x</a>'
+            "</body></html>"
+        )
+        diag = self.diagnose(HttpError("响应不是合法 JSON", 200, body, submission_uncertain=True))
+        self.assertEqual((diag["kind"], diag["category"]), ("uncertain", "submission_uncertain"))
+        self.assertIn("HTML", diag["summary"])
+        self.assertIn("接口地址", diag["hint"])
+        self.assertIn("代理", diag["hint"])
+        self.assertIn("不要", diag["hint"])
+        self.assertIn("Proxy Login", diag["detail"])
+        self.assertNotIn("<html", diag["detail"])
+        self.assertNotIn("page-secret", diag["detail"])
+
+    def test_html_response_without_uncertainty_is_html_category(self):
+        body = b"<html><head><title>Gateway</title></head><body>maintenance</body></html>"
+        diag = self.diagnose(HttpError("响应不是合法 JSON", 200, body))
+        self.assertEqual((diag["kind"], diag["category"]), ("runtime", "html_response"))
+        self.assertFalse(diag["submission_uncertain"])
+        self.assertIn("HTML", diag["summary"])
+        self.assertIn("接口地址", diag["hint"])
+
     def test_unknown_errors_do_not_guess_config_root_cause(self):
         for exc in (RuntimeError("unknown vendor failure"), vendor_error(400, {"code": "Mystery", "message": "unknown"}),
                     vendor_error(404, {"message": "not found"}), vendor_error(503, {"message": "gateway down"})):
