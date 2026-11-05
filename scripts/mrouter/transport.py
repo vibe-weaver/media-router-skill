@@ -112,6 +112,20 @@ def html_summary(body: str) -> str:
     return "HTML 页面"
 
 
+_GATEWAY_TITLE = re.compile(r"(?i)\b(?:new\s*api|one\s*api|newapi|oneapi)\b")
+
+
+def gateway_html_hint(body: str) -> str:
+    """New API / One API 网关网页首页的额外指引；不是这类页面时返回空串。"""
+    page = html_summary(body)
+    if page and _GATEWAY_TITLE.search(page):
+        return (
+            "这像是 New API/One API 网关的网页首页：OpenAI 兼容接口的 endpoint "
+            "需要写到具体路径，例如 /v1/images/generations 或 /v1/audio/speech"
+        )
+    return ""
+
+
 def _is_loopback_url(url: str) -> bool:
     host = (urllib.parse.urlparse(str(url)).hostname or "").lower()
     if host in ("localhost", "::1"):
@@ -220,6 +234,9 @@ class HttpResponse:
                     f"响应不是 JSON，而是 HTML 页面（{page}）："
                     "接口地址可能填成了网页地址，或请求被登录页、代理、防火墙拦截"
                 )
+                gateway = gateway_html_hint(self.text)
+                if gateway:
+                    message += "；" + gateway
                 if uncertain:
                     message += f"\n{_SUBMISSION_HINT}"
                 raise HttpError(

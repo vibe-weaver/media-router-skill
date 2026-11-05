@@ -98,7 +98,7 @@ image:
 `error`（退出码 1）：`fallback_trail[]` 逐条列出失败模型、`kind`（`config` / `runtime` / `uncertain` / `delivery`，下载保留原有 `download`）、诊断及厂商原文。下载的旧错误结构继续兼容；生命周期停止另有公共 `diagnostic`。
 `config` 包含密钥、账户、模型及明确的参数校验错误，不计熔断；引擎错误可能原因未明，不能仅凭 `InvalidParameter` 断言是用户配置错误。智谱 1113 是余额/资源包不足，不等同于限流。
 
-如果厂商原文是 HTML 页面（如 `<!doctype html>`、登录页或网关错误页），通常说明 `endpoint` 填成了网页/控制台地址，或请求被登录页、代理、防火墙拦截。2xx 的 HTML 仍会标为 `submission_uncertain`，先核对接口地址与网络登录状态，再到平台确认任务和计费；确认前不要直接重跑。
+如果厂商原文是 HTML 页面（如 `<!doctype html>`、登录页或网关错误页），通常说明 `endpoint` 填成了网页/控制台地址，或请求被登录页、代理、防火墙拦截。若页面标题是 **New API / One API**，多数情况是只填了网关域名：OpenAI 兼容接口要写完整路径，例如图片 `/v1/images/generations`、语音 `/v1/audio/speech`（视频按网关文档）。2xx 的 HTML 仍会标为 `submission_uncertain`，先核对接口地址与网络登录状态，再到平台确认任务和计费；确认前不要直接重跑。
 
 `--max-attempts` 是第三方候选预算，不控制 HTTP 次数、默认也不包含内置兜底。要首次失败即停，用 `--fail-fast`，禁用 HTTP 重试、候选切换和内置委托；正常等待状态轮询仍继续。
 

@@ -9,7 +9,7 @@ from http.client import IncompleteRead
 from typing import Any
 
 from .config import ConfigError
-from .transport import html_summary, redact
+from .transport import gateway_html_hint, html_summary, redact
 
 # 顶层 InvalidParameter 本身不是确定的配置证据，须结合具体字段校验信息。
 CONFIG_ERROR_CODES = {
@@ -116,6 +116,7 @@ def diagnose_error(exc: Exception) -> dict[str, Any]:
     detail = vendor_error_detail(exc) or redact(str(exc))
     body_text = str(getattr(exc, "body", "") or "")
     page = html_summary(body_text)
+    gateway = gateway_html_hint(body_text)
     evidence = redact(
         f"{json.dumps(error_payload(exc), ensure_ascii=False)} "
         f"{body_text} {exc}"
@@ -134,6 +135,8 @@ def diagnose_error(exc: Exception) -> dict[str, Any]:
                 "接口地址可能填成了网页地址，或请求被登录页、代理、防火墙拦截。"
                 "HTTP 2xx 仍不能证明平台未受理：请先核对平台任务与计费，确认前不要重跑或切换模型。"
             )
+            if gateway:
+                hint += " " + gateway + "。"
         else:
             summary = "提交结果不确定，平台可能已经受理并计费"
             hint = "请先到平台控制台确认任务是否已创建及计费状态；确认前不要再次生成或切换候选重跑。"
@@ -152,6 +155,8 @@ def diagnose_error(exc: Exception) -> dict[str, Any]:
             "接口地址可能填成了网页地址，或请求被登录页、代理、防火墙拦截；"
             "请核对 endpoint、代理与网络登录状态后再试。"
         )
+        if gateway:
+            hint += gateway + "。"
     elif _ENGINE_ERROR.search(evidence):
         category = "engine"
         summary = "厂商引擎返回错误，根因待确认"

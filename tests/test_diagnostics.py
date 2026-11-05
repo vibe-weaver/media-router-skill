@@ -213,6 +213,13 @@ class DiagnosticTests(unittest.TestCase):
         self.assertIn("HTML", diag["summary"])
         self.assertIn("接口地址", diag["hint"])
 
+    def test_new_api_gateway_page_hint_names_full_endpoint_paths(self):
+        body = '<!doctype html><html><head><title>New API</title></head><body>app</body></html>'
+        diag = self.diagnose(HttpError("响应不是 JSON", 200, body, submission_uncertain=True))
+        self.assertIn("New API", diag["hint"])
+        self.assertIn("/v1/images/generations", diag["hint"])
+        self.assertIn("/v1/audio/speech", diag["hint"])
+
     def test_unknown_errors_do_not_guess_config_root_cause(self):
         for exc in (RuntimeError("unknown vendor failure"), vendor_error(400, {"code": "Mystery", "message": "unknown"}),
                     vendor_error(404, {"message": "not found"}), vendor_error(503, {"message": "gateway down"})):

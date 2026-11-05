@@ -211,6 +211,22 @@ class RequestSafetyTests(unittest.TestCase):
         self.assertIn("HTML", str(cm.exception))
         self.assertNotIn(transport._SUBMISSION_HINT, str(cm.exception))
 
+    def test_new_api_gateway_page_recommends_full_endpoint(self):
+        body = b'<!doctype html><html><head><title>New API</title></head><body>app</body></html>'
+        raw = Response(body)
+        raw.status = 200
+        with patch.object(transport, "open_request", return_value=raw):
+            with self.assertRaises(transport.HttpError) as cm:
+                transport.request(
+                    "POST", "https://gw.invalid/v1/images/generations",
+                    generation_submission=True,
+                ).json()
+        text = str(cm.exception)
+        self.assertIn("New API", text)
+        self.assertIn("/v1/images/generations", text)
+        self.assertIn("/v1/audio/speech", text)
+        self.assertTrue(cm.exception.submission_uncertain)
+
     def test_request_keeps_binary_body_unparsed_and_records_method(self):
         body = b"RIFF\x00\xffWAVEbinary-audio"
         for method in ("POST", "PATCH", "GET"):
